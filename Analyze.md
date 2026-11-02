@@ -1,0 +1,2 @@
+## This file will act as notes , samples , tests file for urls and other tools we may need.
+https://www.merrjep.al/njoftime/imobiliare-vendbanime/ne-shitje-kerkoj-te-blej-me-qera-kerkohet-me-qera-nderrohet
