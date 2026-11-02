@@ -24,3 +24,6 @@ The shared parser in `Scraper/Output.py` expects saved HTML and extracts fields 
 
 ## Repository housekeeping
 `.gitignore` now excludes test directories and common Python test filename patterns. Ignore rules do not affect files already tracked by Git, so the tracked `Test/Test.py` remains tracked unless it is explicitly removed from the index. The scraper code has not been changed as part of these notes.
+
+## Errors and Potential Errors / Fixes
+At the moment we are testing each site and scraping each site one at a time to test errors exported data and such but later we must use asynchronous processes and unique playwright drivers to safely and quickly scrape each site in a unique instance.

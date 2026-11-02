@@ -30,6 +30,9 @@ def create_browser_instance():
             browser.close()
             print(f"[green]Total unique properties scraped: {len(SCRAPED_LISTINGS)}[/green]")
 
+    #Hand the scraped listings back to whoever called this function (Engine.py)
+    return SCRAPED_LISTINGS
+
 #Helper function to craft url for next pages to fix pagination issues
 def get_next_page_url(BASE_URL):
     global PAGE_COUNT
@@ -71,7 +74,7 @@ def process_listing_containers(page):
     ))
     results_url = page.url
 
-    for i, upid in enumerate(listing_ids[:5]):
+    for i, upid in enumerate(listing_ids[:5]): #Change the number or remove brackets for unlimited run
         if not upid or upid in PROCESSED_UPIDS:
             print(f"[cyan]Skipping duplicate: {upid}[/cyan]")
             continue
