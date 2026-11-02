@@ -6,3 +6,12 @@
 **/*_test.py
 **/test_*.py
 Test/HTML-Files/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.cache/
+.pytest_cache/
+
+# Generated output
+Output/

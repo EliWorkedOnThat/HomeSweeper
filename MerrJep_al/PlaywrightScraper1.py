@@ -1,12 +1,13 @@
 #Imports
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from rich import print
 import json
+from Scraper.config import Demo_Environment
 
 #Global Variables
 BASE_URL = "https://www.merrjep.al/njoftime/imobiliare-vendbanime/ne-shitje-kerkoj-te-blej-me-qera-kerkohet-me-qera-nderrohet"
 PAGE_COUNT = 1
-SCRAPE_FINISH = 1 #This will dictate how many pages we want to scrape for now its a constant since its in testing
+DEMO_LISTING_LIMIT = 5 #How many listings to scrape when Demo_Environment is True
 URL_QUEUE = []
 PROCESSED_UPIDS = set()
 SCRAPED_LISTINGS = []
@@ -17,13 +18,18 @@ def create_browser_instance():
         browser = p.chromium.launch(headless=False)
         page = browser.new_page()
         try:
-            for _ in range(SCRAPE_FINISH):
+            #Demo stops after DEMO_LISTING_LIMIT listings, production keeps going until we run out of pages
+            while not demo_limit_reached():
                 url = get_next_page_url(BASE_URL)
                 print(f"[cyan]Navigating to: {url}[/cyan]")
                 page.goto(url, wait_until="domcontentloaded", timeout=30000) #Always wait for something to load to avoid timing errors
                 page.wait_for_timeout(5000)
                 print(f"[cyan]{page.title()}[/cyan]")
-                process_listing_containers(page)
+                try:
+                    process_listing_containers(page)
+                except PlaywrightTimeoutError:
+                    print(f"[yellow]No listings found on {url}, assuming last page reached.[/yellow]")
+                    break
                 remove_processed_url()
                 print(f"[green]Page processed. Queue: {URL_QUEUE}[/green]")
         finally:
@@ -32,6 +38,10 @@ def create_browser_instance():
 
     #Hand the scraped listings back to whoever called this function (Engine.py)
     return SCRAPED_LISTINGS
+
+#Helper function to check if we hit the scrape limit while in demo mode
+def demo_limit_reached():
+    return Demo_Environment and len(SCRAPED_LISTINGS) >= DEMO_LISTING_LIMIT
 
 #Helper function to craft url for next pages to fix pagination issues
 def get_next_page_url(BASE_URL):
@@ -74,7 +84,11 @@ def process_listing_containers(page):
     ))
     results_url = page.url
 
-    for i, upid in enumerate(listing_ids[:5]): #Change the number or remove brackets for unlimited run
+    for i, upid in enumerate(listing_ids):
+        if demo_limit_reached():
+            print(f"[yellow]Demo limit of {DEMO_LISTING_LIMIT} listings reached.[/yellow]")
+            break
+
         if not upid or upid in PROCESSED_UPIDS:
             print(f"[cyan]Skipping duplicate: {upid}[/cyan]")
             continue
@@ -99,6 +113,7 @@ def process_listing_containers(page):
             print(f"[green]Scraped: {data['title']}[/green]")
             print(f"[bright_green]Price: {data['price']} {data['currency']}[/bright_green]")
             print(f"[bright_green]Images: {len(data['images'])}[/bright_green]")
+            print(f"[bright_green]Phone: {data['phone'] or 'Not available'}[/bright_green]")
 
         except Exception as error:
             print(f"[red]Failed to scrape {upid}: {error}[/red]")
@@ -175,6 +190,22 @@ def pull_data_from_listing(page, expected_upid):
     seller = page.locator(".mobile-seller-info .user-name")
     seller_name = seller.first.inner_text().strip() if seller.count() else None
 
+    #Extract seller phone number from the contact button (not every listing has one)
+    phone = page.locator("button .main-contact bdi")
+    phone_1 = phone.first.text_content().strip() if phone.count() else None
+
+    #Extract seller phone number from the contact item link (second place the number can show up)
+    contact = page.locator('.contact-item a[href^="tel:"]')
+    phone_2 = None
+    if contact.count():
+        contact_bdi = contact.first.locator("bdi")
+        if contact_bdi.count():
+            phone_2 = contact_bdi.first.text_content().strip()
+        else:
+            phone_2 = contact.first.get_attribute("href").replace("tel:", "").strip()
+
+    phones = combine_phones(phone_1 or None, phone_2 or None)
+
     #Extract publication information
     date = page.locator(".ad-publish-info-area .published-date")
     time = page.locator(".ad-publish-info-area .published-time")
@@ -192,11 +223,24 @@ def pull_data_from_listing(page, expected_upid):
         "attributes": attributes,
         "images": images,
         "seller": seller_name,
+        "phone": phones,
         "published_date": date.first.inner_text().strip() if date.count() else None,
         "published_time": time.first.inner_text().strip() if time.count() else None
     }
 
     return data
+
+#Helper function to merge both phone numbers: one if they match, both split by ";" if they don't, None if neither found
+def combine_phones(phone_1, phone_2):
+    def digits(number):
+        return "".join(char for char in number if char.isdigit())
+
+    if phone_1 and phone_2:
+        if digits(phone_1) == digits(phone_2):
+            return phone_1
+        return f"{phone_1}; {phone_2}"
+
+    return phone_1 or phone_2
 
 #Call each function as needed this will act as the orchestrator
 if __name__ == "__main__":
