@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup as bs
 #The url we will send the request to
 URL = "https://www.merrjep.al/njoftime/imobiliare-vendbanime/ne-shitje-kerkoj-te-blej-me-qera-kerkohet-me-qera-nderrohet"
 
-#We will use headers to impersonate a real browser call to avoid being flagged
+#Use headers to impersonate a real browser call to avoid being flagged
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
