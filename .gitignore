@@ -1,0 +1,8 @@
+# Test folders and generated test files
+**/Test/
+**/Tests/
+**/test/
+**/tests/
+**/*_test.py
+**/test_*.py
+Test/HTML-Files/

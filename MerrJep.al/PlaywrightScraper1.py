@@ -45,6 +45,10 @@ def remove_processed_url():
     if URL_QUEUE:
         return URL_QUEUE.pop(0)
 
+#Helper function to go back to previous page if needed
+def go_back(page):
+    page.go_back()
+
 #Function to find each listing container
 def find_listing_containers(page):
     listings = page.locator("div.row.row-listing[data-product-id]")
@@ -52,6 +56,10 @@ def find_listing_containers(page):
     count = listings.count()
     print(f"Found {count} listings on the page.")
     return listings
+
+#Function to open a listing container and extract data
+def pull_data_from_listing():
+    pass
 
 #Call each function as needed this will act as the orchestrator
 if __name__ == "__main__":

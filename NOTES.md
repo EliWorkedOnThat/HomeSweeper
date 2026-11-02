@@ -1,18 +1,26 @@
-## Notes for now before i generate a real notes file
-The structure is simple each page to be scraped must contain a 
-playwright and request folder in its own directory so we can fix issues for each one seperately and easily debug or scale.
+﻿# HomeSweeper project notes
 
-Always run tests when anything changes in the website or library that you are using no exceptions.
+## Purpose
+HomeSweeper is an early-stage collection of web scrapers. Each target site has its own folder so its browser-based Playwright scraper and direct HTTP request scraper can be developed independently. The current examples target MerrJep.al; a `GazetaCelesi` folder is also present.
 
-There will be an Engine.py and Output.py that will set the example and be used as the mass scraping orchestrator and output file generator.
+## Project layout
+- `MerrJep.al/` — site-specific Playwright and HTTPX scraper scripts.
+- `GazetaCelesi/` — another site-specific pair of scraper scripts; confirm and maintain its target URL and selectors as work continues.
+- `Scraper/Engine.py` — intended shared entry point for coordinating scraping jobs. It currently contains an initial MerrJep.al request/parsing experiment.
+- `Scraper/Output.py` — intended place for shared output handling. It currently parses listing cards from a saved HTML page and builds structured fields; it does not yet write a final output file.
+- `Test/` — development utilities and test code, including an HTML analyzer and a test script. The HTML capture script can recreate `Test/HTML-Files/` when it runs.
+- `Analyze.md` — a scratch area for sample URLs and analysis notes.
 
-Each script is called by the orchestrator in production always and the only exemption is Test Files ofcourse.
+## Current state
+The Playwright scraper in `MerrJep.al/` opens the listings page, builds page URLs, and detects listing cards. Listing extraction is still a placeholder. Its paired HTTPX script fetches a page with browser-like headers, but is not yet connected to the shared parser or output flow.
 
-## UI
-There is no UI yet until we have a stable demo for scraping the main focus should be getting scrapers to consistently pull what we want from each site.
+The shared parser in `Scraper/Output.py` expects saved HTML and extracts fields such as title, price, location, seller details, and image. Some fields are guesses based on listing text and should be checked against real examples. `Scraper/Engine.py` and `Scraper/Output.py` are prototypes, not a completed production orchestrator.
 
-## Some valuable info
-Make sure to use headers and rotate them if possible.
-Use randomised rests and patterns to avoid detection.
-Add rate limiting to requests when sending them out.
-Urls can be crafter to act as the filtering the user/client will use in order to scrape based on what the client wants.
+## Next steps
+1. Agree on a consistent record format for listings.
+2. Finish and validate extraction for one site, including missing or changed fields.
+3. Connect fetching, parsing, and output through the shared engine.
+4. Keep site-specific selectors and behavior in each site's folder; put reusable coordination and output logic in `Scraper/`.
+
+## Repository housekeeping
+`.gitignore` now excludes test directories and common Python test filename patterns. Ignore rules do not affect files already tracked by Git, so the tracked `Test/Test.py` remains tracked unless it is explicitly removed from the index. The scraper code has not been changed as part of these notes.
