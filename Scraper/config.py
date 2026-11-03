@@ -1,9 +1,6 @@
 #Here we will house all thats needed as configurations for each scraper 
 #It will act as a global variable holder
 
-#Time in minutes to wait before rescraping
-Rotation_Rescraping_Time = 5
-
 #Time in seconds to rest between scraping listings so we don't pull them instantly and get flagged
 Rest_Time = 3
 
@@ -11,7 +8,7 @@ Rest_Time = 3
 Demo_Environment = True
 
 #Boolean to run the scraper browser invisibly in the background (Set to False to watch the browser window while debugging)
-Headless = True
+Headless = False
 
 #Database name to use for all scrapers
 Database_Name = "Homesweeper.db"

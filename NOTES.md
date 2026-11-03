@@ -41,8 +41,8 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 ### Config (`Scraper/config.py`)
 - `Demo_Environment = True` limits each run to `DEMO_LISTING_LIMIT` (5) listings, which is set in the MerrJep scraper. Set it to `False` to scrape every page.
 - `Rest_Time = 3` is the number of seconds to rest after each listing before opening the next one, so requests aren't fired instantly and flagged.
-- `Rotation_Rescraping_Time = 5` is meant to be the minutes between rescrapes. It is **defined but not used yet**.
-- `Headless = True` runs the scraper browser with no window. Set it to `False` to watch a scrape.
+- `Headless`: `True` runs the scraper browser with no window, and `False` shows it so you can watch a scrape.
+- The rescrape interval is **no longer in config**. The old `Rotation_Rescraping_Time` constant was removed, and staff now pick the interval in the UI (see [Automatic scraping](#automatic-scraping)).
 - `Database_Name = "Homesweeper.db"` is the name of the SQLite file inside `Data/`.
 
 ### Database (`Scraper/DB.py`)
@@ -111,7 +111,9 @@ Staff won't use a terminal. The app will run as a **local website**: a Python se
 Browser (localhost:8000)  ──HTTP──▶  Python web server (FastAPI)
   HTML / CSS / JS                      ├── GET  /api/listings      → DB.get_listings()
   table, filters, buttons              ├── POST /api/scrape/start  → Engine.main() in a background thread
-                                       ├── GET  /api/scrape/status → running / done / error + counts
+                                       ├── GET  /api/scrape/status → running / done / error + counts + auto mode
+                                       ├── POST /api/auto/start    → auto mode on / change interval {interval_minutes}
+                                       ├── POST /api/auto/stop     → auto mode off
                                        └── GET  /api/export        → download listings.xlsx
 ```
 
@@ -136,11 +138,27 @@ Later: if several staff need the same data at once, run this same app on one off
   2. **Traffic to the site.** Two browsers hitting MerrJep at once doubles the request rate and undoes the `Rest_Time` pacing, which raises the chance of being blocked.
   3. **SQLite writes.** SQLite allows only one writer at a time. Two scrapes saving together would mostly just wait for each other, but it's needless contention.
 - **How it's used:** `SCRAPE_LOCK.acquire(blocking=False)` doesn't wait for the lock. If a scrape is already running, it fails immediately and `/api/scrape/start` returns a **409 "already running"** error. The lock is then held for the whole scrape and released in the `finally` block of `run_scrape()`, so it's freed even if the scrape crashes.
-- **Rule for new code:** anything that starts a scrape (a button, a timer, a new site) must go through this same lock. Never call `Engine.main()` from a second place without it.
+- **Rule for new code:** anything that starts a scrape (a button, a timer, a new site) must go through this same lock. Never call `Engine.main()` from a second place without it. In practice, call `start_scrape(source)`: both the button and the auto timer use it.
+
+#### Automatic scraping
+**Done.** The top bar has an interval dropdown (every 1, 5, 10, 15 or 30 minutes, or 1 hour) and a **▶ Nis automatikun / ■ Ndalo automatikun** button ("start / stop automatic"). A blue label shows a live countdown to the next run.
+
+How it works (`Scraper/Server.py`):
+- **The presets live in `AUTO_INTERVALS`.** The server rejects any other value with a 400. If you change the presets, change the `<option>`s in `UI/index.html` too.
+- **`auto_loop()` runs in a background thread** started with the server, so it needs no cron or Task Scheduler and works the same on every OS. It sleeps on the `AUTO_WAKE` event until the next run is due, and changes like auto on/off or a finished scrape wake it early.
+- **Every automatic run goes through `start_scrape("auto")`**, the same lock and the same `run_scrape()` as the button. If a manual scrape is running when a round is due, that round is skipped and checked again every `BUSY_RETRY_SECONDS`.
+- **The wait is counted from when a run finishes**, whether it was manual or automatic. `run_scrape()` sets `next_run = finished + interval`, so runs never overlap.
+- **Behaviour when switching:**
+  - Turning auto on scrapes straight away.
+  - Changing the interval while auto is on reschedules from the last run's finish time.
+  - Turning auto off cancels the next run, but a scrape that is already running finishes.
+- **`STATE_LOCK`** (an RLock) guards `SCRAPE_STATUS` and `AUTO`, because the request threads, the scrape thread and the auto thread all touch them.
+- **Auto mode lives in server memory**, so restarting the server turns it off.
+- **The page polls `/api/scrape/status`** every 3 s while auto mode is on, and reloads the listings whenever `finished_at` changes.
 
 ### Phase 3 — More sites and polish
 1. Start the GazetaCelesi scraper using the same contract: a function that returns a list of listing dicts in the same shape, which the engine saves with `site="gazetacelesi"`.
-2. **Automatic scraping mode**, assigned to Alex. See [For Alex's Claude](#for-alexs-claude).
+2. ~~Automatic scraping mode~~ **Done**; see [Automatic scraping](#automatic-scraping). Follow-ups are listed in [For Alex's Claude](#for-alexs-claude).
 3. Add a `price_history` table so price changes are kept instead of overwritten.
 4. Move per-site settings such as the demo limit and wait times into `config.py` where it makes sense.
 5. Replace the fixed `wait_for_timeout(5000)` with element-based waits.
@@ -154,22 +172,14 @@ Later: if several staff need the same data at once, run this same app on one off
 
 ## For Alex's Claude
 
-### TODO (Alex): automatic scraping mode
-Right now a scrape only runs when someone presses **Start scrape** in the UI or runs `Scraper.Engine` by hand. We need an **automatic mode** that rescrapes on its own every `Rotation_Rescraping_Time` minutes (already in `Scraper/config.py`, currently unused), so staff always see fresh listings without touching anything.
+### Automatic scraping mode: built (this was Alex's task, now done)
+The base version is in, following the spec that used to be here: an on/off button plus an interval dropdown in the UI, a timer thread inside the server, every run going through `SCRAPE_LOCK`, the wait counted from the end of each run, and a countdown in the status. See [Automatic scraping](#automatic-scraping) for how it works.
 
-What it should do:
-- **On/off from the UI.** Add a toggle next to Start scrape that shows whether auto mode is on and when the next run is due. Manual Start scrape must keep working alongside it.
-- **Run inside the server.** Use a background thread in `Scraper/Server.py` that wakes up every `Rotation_Rescraping_Time` minutes. No OS schedulers (cron / Task Scheduler), because the app has to work the same on Windows, Linux and macOS.
-- **Use the existing scrape lock.** Each automatic run must start through `SCRAPE_LOCK.acquire(blocking=False)` and the same `run_scrape()` path as the button (see [How the scrape lock works](#how-the-scrape-lock-works)). If a scrape is already running when the timer fires, skip that round instead of queueing it.
-- **Count the wait from when a run finishes**, not from when it started, so a slow scrape never overlaps the next one or eats into the rest time.
-- **Stop cleanly.** Turning auto mode off, or pressing Ctrl+C on the server, should stop the timer. An in-progress scrape can finish.
-- **Show it in the status.** Extend `/api/scrape/status` (or add `/api/auto/status`) with whether auto mode is on, the last automatic run's result, and the time of the next run.
-
-Do these first, otherwise every automatic round rescrapes everything:
-- Phase 1, step 6: `get_known_upids(site)` in `DB.py`, so the scraper skips listings already in the database before clicking into them.
-- Headless is already the default (`Headless = True` in `config.py`), so no Chrome window pops up on staff PCs.
-
-Nice to have:
+Still open, if you want to pick these up:
+- **Most important:** Phase 1, step 6, `get_known_upids(site)` in `DB.py`, so the scraper skips listings already in the database before clicking into them. Without it every automatic round reopens every listing. That's fine in demo mode (5 listings), but with `Demo_Environment = False` and a 1-minute interval it would be scraping nonstop.
+- Make sure `Headless = True` in `config.py` before staff use auto mode, so a Chrome window doesn't pop up every round.
+- Remember auto mode across server restarts (it currently lives in memory and turns off on restart).
+- Show the last automatic run's result separately from manual runs (the status currently shows only the latest run).
 - Only run during working hours, with the hours set in `config.py`.
 - Add a little random jitter to the interval, so the requests don't arrive on an exact clock.
 - When there are more sites (GazetaCelesi), go through them one after another inside the same lock.

@@ -27,6 +27,9 @@ const SORTS = {
 
 let allListings = [];
 let pollTimer = null;
+let lastFinished; // finished_at of the last scrape we've seen, a change means new listings to load
+let autoState = null; // The "auto" part of /api/scrape/status
+let scrapeState = "idle";
 
 const $ = (id) => document.getElementById(id);
 const dialog = $("preview");
@@ -66,10 +69,15 @@ function joinParts(...parts) {
     return kept.length ? kept.join(" · ") : null;
 }
 
+// "2026-11-03 15:01:00" (UTC, from the database/server) -> Date
+function parseUtc(timestamp) {
+    return new Date(`${timestamp.replace(" ", "T")}Z`);
+}
+
 // "2026-11-03 15:01:00" (UTC, from the database) -> "03.11.2026, 16:01" in Albanian time
 function localTime(timestamp) {
     if (isEmpty(timestamp)) return null;
-    const date = new Date(`${timestamp.replace(" ", "T")}Z`);
+    const date = parseUtc(timestamp);
     if (isNaN(date)) return timestamp;
     // Only take the numbers from Intl (converted to Tirana time) and lay them out ourselves, same reason as formatNumber
     const parts = Object.fromEntries(
@@ -444,23 +452,37 @@ async function startScrape() {
     checkStatus();
 }
 
+// Polls while a scrape runs or auto mode is on, and reloads the listings whenever a scrape finishes
 async function checkStatus() {
-    const status = await (await fetch("/api/scrape/status")).json();
-    showStatus(status);
-
     clearTimeout(pollTimer);
-    if (status.state === "running") {
+    let status;
+    try {
+        status = await (await fetch("/api/scrape/status")).json();
+    } catch {
+        showOffline();
+        pollTimer = setTimeout(checkStatus, POLL_MS); // Keep trying until the server is back
+        return;
+    }
+
+    showStatus(status);
+    showAuto(status.auto);
+
+    if (lastFinished !== undefined && status.finished_at !== lastFinished) {
+        loadListings(); // A scrape (manual or automatic) just finished, pick up what it saved
+    }
+    lastFinished = status.finished_at;
+
+    if (status.state === "running" || status.auto.enabled) {
         pollTimer = setTimeout(checkStatus, POLL_MS);
-    } else if (status.state === "done" || status.state === "error") {
-        loadListings(); // Pick up whatever the scrape saved
     }
 }
 
 function showStatus(status) {
+    scrapeState = status.state;
     const pill = $("status");
     const labels = {
         idle: "Në pritje",
-        running: "Duke mbledhur…",
+        running: status.source === "auto" ? "Duke mbledhur (automatik)…" : "Duke mbledhur…",
         done: status.result ? `Përfundoi — ${status.result.saved} u ruajtën` : "Përfundoi",
         error: "Gabim",
     };
@@ -469,6 +491,88 @@ function showStatus(status) {
     pill.title = status.state === "error" ? "Mbledhja dështoi. Shiko konsolën e serverit për detaje." : "";
     $("scrape-btn").disabled = status.state === "running";
     $("stat-last").textContent = localTime(status.finished_at)?.split(", ")[1] || "–";
+}
+
+function showOffline() {
+    const pill = $("status");
+    pill.textContent = "Serveri nuk përgjigjet";
+    pill.className = "status status-error";
+    pill.title = "Sigurohu që serveri është i ndezur.";
+}
+
+// ---------- Automatic scraping ----------
+
+function showAuto(auto) {
+    autoState = auto;
+    const btn = $("auto-btn");
+    btn.textContent = auto.enabled ? "■ Ndalo automatikun" : "▶ Nis automatikun";
+    btn.classList.toggle("btn-on", auto.enabled);
+    if (auto.enabled && auto.interval_minutes) {
+        $("auto-interval").value = String(auto.interval_minutes); // Show what the server is actually using
+    }
+    updateCountdown();
+}
+
+// "Automatik · tjetra pas 4:32" — ticks every second from the next_run_at the server gave us
+function updateCountdown() {
+    const pill = $("auto-status");
+    if (!autoState || !autoState.enabled) {
+        pill.hidden = true;
+        return;
+    }
+    pill.hidden = false;
+
+    if (scrapeState === "running") {
+        pill.textContent = "Automatik · duke mbledhur…";
+    } else if (autoState.next_run_at) {
+        const seconds = Math.max(0, Math.round((parseUtc(autoState.next_run_at) - Date.now()) / 1000));
+        pill.textContent = seconds > 0 ? `Automatik · tjetra pas ${formatDuration(seconds)}` : "Automatik · po fillon…";
+    } else {
+        pill.textContent = "Automatik · në pritje…";
+    }
+    pill.title = `Njoftimet mblidhen automatikisht ${$("auto-interval").selectedOptions[0].textContent.toLowerCase()}.`;
+}
+
+// 272 -> "4:32", 3725 -> "1:02:05"
+function formatDuration(totalSeconds) {
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = String(totalSeconds % 60).padStart(2, "0");
+    return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
+
+async function startAuto() {
+    return fetch("/api/auto/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interval_minutes: Number($("auto-interval").value) }),
+    });
+}
+
+async function toggleAuto() {
+    const btn = $("auto-btn");
+    btn.disabled = true;
+    try {
+        const response = autoState && autoState.enabled
+            ? await fetch("/api/auto/stop", { method: "POST" })
+            : await startAuto();
+        if (!response.ok) alert("Mbledhja automatike nuk mund të ndryshohej. Provo përsëri.");
+    } catch {
+        alert("Serveri nuk përgjigjet. Sigurohu që është i ndezur.");
+    } finally {
+        btn.disabled = false;
+        checkStatus();
+    }
+}
+
+// Changing the interval while auto mode is on applies it straight away
+async function changeAutoInterval() {
+    if (!autoState || !autoState.enabled) return;
+    try {
+        await startAuto();
+    } finally {
+        checkStatus();
+    }
 }
 
 // ---------- Wiring ----------
@@ -513,6 +617,9 @@ $("f-clear").addEventListener("click", () => {
 window.addEventListener("resize", debounce(() => markOverflow($("cards")), 150));
 
 $("scrape-btn").addEventListener("click", startScrape);
+$("auto-btn").addEventListener("click", toggleAuto);
+$("auto-interval").addEventListener("change", changeAutoInterval);
+setInterval(updateCountdown, 1000);
 
 SELECT_FILTERS.forEach(([id, , label]) => $(id).replaceChildren(new Option(label, "")));
 loadListings();

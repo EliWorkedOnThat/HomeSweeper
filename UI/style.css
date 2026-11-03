@@ -90,6 +90,20 @@ body.no-scroll { overflow: hidden; } /* Page stays put while a preview is open *
 .status-running { color: var(--warn); }
 .status-done { color: var(--ok); }
 .status-error { color: var(--err); }
+.status-auto { color: var(--accent); font-variant-numeric: tabular-nums; } /* Fixed-width digits so the countdown doesn't jiggle */
+
+/* ---------- Automatic scraping controls ---------- */
+.auto-group { display: flex; gap: 6px; min-width: 0; }
+.auto-group select {
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+}
+.btn-on { border-color: var(--accent); color: var(--accent); background: var(--chip-bg); }
 
 main { padding: 20px 24px 40px; max-width: 1600px; margin: 0 auto; }
 

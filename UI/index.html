@@ -15,6 +15,19 @@
         </div>
         <div class="actions">
             <span id="status" class="status status-idle">Në pritje</span>
+            <span id="auto-status" class="status status-auto" hidden></span>
+            <!-- Automatic scraping: how often (minutes) + on/off. The options must match AUTO_INTERVALS in Scraper/Server.py -->
+            <div class="auto-group">
+                <select id="auto-interval" title="Sa shpesh të mblidhen njoftimet automatikisht">
+                    <option value="1">Çdo 1 minutë</option>
+                    <option value="5">Çdo 5 minuta</option>
+                    <option value="10">Çdo 10 minuta</option>
+                    <option value="15" selected>Çdo 15 minuta</option>
+                    <option value="30">Çdo 30 minuta</option>
+                    <option value="60">Çdo 1 orë</option>
+                </select>
+                <button id="auto-btn" class="btn">▶ Nis automatikun</button>
+            </div>
             <button id="scrape-btn" class="btn btn-primary">Mblidh njoftimet</button>
             <a id="export-btn" class="btn" href="/api/export">Eksporto në Excel</a>
         </div>
