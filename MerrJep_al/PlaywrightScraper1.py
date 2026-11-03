@@ -2,7 +2,8 @@
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from rich import print
 import json
-from Scraper.config import Demo_Environment
+import re
+from Scraper.config import Demo_Environment, Rest_Time
 
 #Global Variables
 BASE_URL = "https://www.merrjep.al/njoftime/imobiliare-vendbanime/ne-shitje-kerkoj-te-blej-me-qera-kerkohet-me-qera-nderrohet"
@@ -11,6 +12,17 @@ DEMO_LISTING_LIMIT = 5 #How many listings to scrape when Demo_Environment is Tru
 URL_QUEUE = []
 PROCESSED_UPIDS = set()
 SCRAPED_LISTINGS = []
+
+#MerrJep's attribute labels mapped to our standard database columns (every site maps its own labels to these)
+ATTRIBUTE_COLUMNS = {
+    "Lloji i njoftimit": "listing_type",
+    "Sipërfaqe": "size_m2",
+    "Numri i dhomave": "rooms",
+    "Gjendje": "condition",
+    "Komuna": "city",
+    "Adresa/Rruga": "address",
+    "Njoftim nga": "posted_by",
+}
 
 #Function to create a browser instance
 def create_browser_instance():
@@ -122,6 +134,10 @@ def process_listing_containers(page):
             if page.url != results_url:
                 go_back(page)
 
+        #Rest before opening the next listing to avoid getting flagged
+        print(f"[cyan]Resting {Rest_Time}s before next listing...[/cyan]")
+        page.wait_for_timeout(Rest_Time * 1000)
+
 #Function to open a listing container and extract data
 def pull_data_from_listing(page, expected_upid):
     page.locator(".ad-details-page h1").wait_for(state="visible", timeout=15000)
@@ -228,7 +244,34 @@ def pull_data_from_listing(page, expected_upid):
         "published_time": time.first.inner_text().strip() if time.count() else None
     }
 
+    #Copy the important attributes into their own fields so they get their own database columns (attributes keeps everything as a backup)
+    for label, column in ATTRIBUTE_COLUMNS.items():
+        data[column] = attributes.get(label)
+    data["size_m2"] = parse_number(data["size_m2"])
+    data["rooms"] = parse_number(data["rooms"], whole=True)
+
     return data
+
+#Helper function to pull the number out of text like "70 m2", "1.200 m2" or "3+", returns None if there is no number
+def parse_number(text, whole=False):
+    if not text:
+        return None
+
+    match = re.search(r"\d[\d.,]*", text)
+    if not match:
+        return None
+
+    number = match.group().rstrip(".,")
+    if re.fullmatch(r"\d{1,3}([.,]\d{3})+", number):
+        number = re.sub(r"[.,]", "", number) #"1.200" is twelve hundred, not one point two
+    else:
+        number = number.replace(",", ".")
+
+    try:
+        value = float(number)
+    except ValueError:
+        return None
+    return int(value) if whole else value
 
 #Helper function to merge both phone numbers: one if they match, both split by ";" if they don't, None if neither found
 def combine_phones(phone_1, phone_2):
