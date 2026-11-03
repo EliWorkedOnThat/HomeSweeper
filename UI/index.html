@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="sq">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,56 +7,60 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <!-- All text the user sees must be in Albanian (see CLAUDE.md) -->
     <header class="topbar">
         <div class="brand">
             <span class="logo">🏠</span>
             <h1>HomeSweeper</h1>
         </div>
         <div class="actions">
-            <span id="status" class="status status-idle">Idle</span>
-            <button id="scrape-btn" class="btn btn-primary">Start scrape</button>
-            <a id="export-btn" class="btn" href="/api/export">Export Excel</a>
+            <span id="status" class="status status-idle">Në pritje</span>
+            <button id="scrape-btn" class="btn btn-primary">Mblidh njoftimet</button>
+            <a id="export-btn" class="btn" href="/api/export">Eksporto në Excel</a>
         </div>
     </header>
 
     <main>
         <section class="stats">
-            <div class="stat"><span class="stat-value" id="stat-total">–</span><span class="stat-label">Listings stored</span></div>
-            <div class="stat"><span class="stat-value" id="stat-shown">–</span><span class="stat-label">Matching filters</span></div>
-            <div class="stat"><span class="stat-value" id="stat-phone">–</span><span class="stat-label">With phone number</span></div>
-            <div class="stat"><span class="stat-value" id="stat-last">–</span><span class="stat-label">Last scrape</span></div>
+            <div class="stat"><span class="stat-value" id="stat-total">–</span><span class="stat-label">Njoftime të ruajtura</span></div>
+            <div class="stat"><span class="stat-value" id="stat-shown">–</span><span class="stat-label">Përputhen me filtrat</span></div>
+            <div class="stat"><span class="stat-value" id="stat-phone">–</span><span class="stat-label">Me numër telefoni</span></div>
+            <div class="stat"><span class="stat-value" id="stat-last">–</span><span class="stat-label">Mbledhja e fundit</span></div>
         </section>
 
         <section class="filters">
-            <input id="f-search" type="search" placeholder="Search title, description, address, phone…">
-            <select id="f-type"><option value="">All types</option></select>
-            <select id="f-city"><option value="">All cities</option></select>
-            <input id="f-min" type="number" min="0" placeholder="Min price">
-            <input id="f-max" type="number" min="0" placeholder="Max price">
-            <button id="f-clear" class="btn btn-ghost">Clear</button>
+            <input id="f-search" type="search" placeholder="Kërko titull, përshkrim, adresë, telefon, shitës, etiketa…">
+            <select id="f-type"></select>
+            <select id="f-city"></select>
+            <select id="f-condition"></select>
+            <select id="f-posted"></select>
+            <input id="f-min" type="number" min="0" placeholder="Çmimi min.">
+            <input id="f-max" type="number" min="0" placeholder="Çmimi maks.">
+            <select id="f-sort" title="Rendit sipas">
+                <option value="newest">Më të rejat</option>
+                <option value="oldest">Më të vjetrat</option>
+                <option value="price-asc">Çmimi: nga më i ulëti</option>
+                <option value="price-desc">Çmimi: nga më i larti</option>
+                <option value="size-desc">Më të mëdhatë</option>
+                <option value="rooms-desc">Më shumë dhoma</option>
+                <option value="title">Titulli A → Z</option>
+            </select>
+            <button id="f-clear" class="btn btn-ghost">Pastro</button>
         </section>
 
-        <section class="table-wrap">
-            <table id="listings">
-                <thead>
-                    <tr>
-                        <th></th>
-                        <th data-sort="title">Title</th>
-                        <th data-sort="price">Price</th>
-                        <th data-sort="listing_type">Type</th>
-                        <th data-sort="size_m2">m²</th>
-                        <th data-sort="rooms">Rooms</th>
-                        <th data-sort="city">City</th>
-                        <th data-sort="phone">Phone</th>
-                        <th data-sort="seller">Seller</th>
-                        <th data-sort="first_seen">First seen</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
-            <p id="empty" class="empty" hidden>No listings yet — press <strong>Start scrape</strong> to fetch some.</p>
-        </section>
+        <section id="cards" class="cards"></section>
+        <p id="empty" class="empty" hidden>Ende nuk ka njoftime — shtyp <strong>Mblidh njoftimet</strong> për të marrë të parat.</p>
+        <p id="no-match" class="empty" hidden>Asnjë njoftim nuk përputhet me këta filtra.</p>
     </main>
+
+    <!-- One shared popup for every preview: long text, tags, photo gallery and the full listing -->
+    <dialog id="preview" class="preview">
+        <div class="preview-head">
+            <h2 id="preview-title"></h2>
+            <button id="preview-close" class="btn btn-ghost" aria-label="Mbyll" title="Mbyll">✕</button>
+        </div>
+        <div id="preview-body" class="preview-body"></div>
+    </dialog>
 
     <script src="app.js"></script>
 </body>

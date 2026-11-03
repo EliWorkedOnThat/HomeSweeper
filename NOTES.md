@@ -36,12 +36,13 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
   - Phone number, read from two places: the contact button (`button .main-contact bdi`) and the `tel:` contact link. `combine_phones()` keeps one number if both match by digits, joins them with `; ` if they differ, and returns `None` if neither exists.
   - Published date and time.
 - It checks that the UPID in the JSON-LD matches the card it clicked on.
-- It runs with `headless=False`, waits a fixed 5 s after each page load, and rests `Rest_Time` seconds after each listing.
+- It runs headless (no window) when `Headless = True` in `config.py`, which is the default. In that mode `launch_browser()` uses `channel="chromium"` and a user agent without "HeadlessChrome", so sites see the same fingerprint as the visible browser. It waits a fixed 5 s after each page load and rests `Rest_Time` seconds after each listing.
 
 ### Config (`Scraper/config.py`)
 - `Demo_Environment = True` limits each run to `DEMO_LISTING_LIMIT` (5) listings, which is set in the MerrJep scraper. Set it to `False` to scrape every page.
 - `Rest_Time = 3` is the number of seconds to rest after each listing before opening the next one, so requests aren't fired instantly and flagged.
 - `Rotation_Rescraping_Time = 5` is meant to be the minutes between rescrapes. It is **defined but not used yet**.
+- `Headless = True` runs the scraper browser with no window. Set it to `False` to watch a scrape.
 - `Database_Name = "Homesweeper.db"` is the name of the SQLite file inside `Data/`.
 
 ### Database (`Scraper/DB.py`)
@@ -141,7 +142,7 @@ Later: if several staff need the same data at once, run this same app on one off
 1. Start the GazetaCelesi scraper using the same contract: a function that returns a list of listing dicts in the same shape, which the engine saves with `site="gazetacelesi"`.
 2. **Automatic scraping mode**, assigned to Alex. See [For Alex's Claude](#for-alexs-claude).
 3. Add a `price_history` table so price changes are kept instead of overwritten.
-4. Move per-site settings such as the demo limit, headless mode and wait times into `config.py` where it makes sense.
+4. Move per-site settings such as the demo limit and wait times into `config.py` where it makes sense.
 5. Replace the fixed `wait_for_timeout(5000)` with element-based waits.
 6. Use `Request1.py` (HTTPX) where JS rendering isn't needed. It is faster than Playwright.
 7. Add proper logging to the engine.
@@ -166,7 +167,7 @@ What it should do:
 
 Do these first, otherwise every automatic round rescrapes everything:
 - Phase 1, step 6: `get_known_upids(site)` in `DB.py`, so the scraper skips listings already in the database before clicking into them.
-- Probably run headless in auto mode (`headless=True`), so a Chrome window doesn't keep popping up on staff PCs.
+- Headless is already the default (`Headless = True` in `config.py`), so no Chrome window pops up on staff PCs.
 
 Nice to have:
 - Only run during working hours, with the hours set in `config.py`.

@@ -82,7 +82,7 @@ def api_export():
     finally:
         connection.close()
 
-    filename = f"homesweeper_listings_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    filename = f"njoftime_homesweeper_{datetime.now().strftime('%Y-%m-%d')}.xlsx" #Staff see this name, so it's Albanian
     return Response(
         content=build_workbook(listings),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

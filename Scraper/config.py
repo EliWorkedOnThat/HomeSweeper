@@ -10,5 +10,8 @@ Rest_Time = 3
 #Boolean to determine if we are in a demo or production environment (Set to false to start production work)
 Demo_Environment = True
 
+#Boolean to run the scraper browser invisibly in the background (Set to False to watch the browser window while debugging)
+Headless = True
+
 #Database name to use for all scrapers
 Database_Name = "Homesweeper.db"

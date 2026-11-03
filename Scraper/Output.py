@@ -84,10 +84,10 @@ def build_workbook(listings):
 
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = SHEET_NAME
-    sheet.append(headers)
+    sheet.title = SHEET_NAME #type: ignore
+    sheet.append(headers) #type: ignore
     for row in rows:
-        sheet.append([row.get(header) for header in headers])
+        sheet.append([row.get(header) for header in headers]) #type: ignore
 
     buffer = BytesIO()
     workbook.save(buffer)

@@ -3,7 +3,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from rich import print
 import json
 import re
-from Scraper.config import Demo_Environment, Rest_Time
+from Scraper.config import Demo_Environment, Rest_Time, Headless
 
 #Global Variables
 BASE_URL = "https://www.merrjep.al/njoftime/imobiliare-vendbanime/ne-shitje-kerkoj-te-blej-me-qera-kerkohet-me-qera-nderrohet"
@@ -28,8 +28,7 @@ ATTRIBUTE_COLUMNS = {
 def create_browser_instance():
     reset_state() #Start fresh every run, otherwise a second run (e.g. from the UI) continues where the last one stopped
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
+        browser, page = launch_browser(p)
         try:
             #Demo stops after DEMO_LISTING_LIMIT listings, production keeps going until we run out of pages
             while not demo_limit_reached():
@@ -51,6 +50,23 @@ def create_browser_instance():
 
     #Hand a copy of the scraped listings back to whoever called this function (Engine.py)
     return list(SCRAPED_LISTINGS)
+
+#Helper function to open the browser, with no window when Headless is True (see config.py)
+def launch_browser(p):
+    if not Headless:
+        browser = p.chromium.launch(headless=False)
+        return browser, browser.new_page()
+
+    #channel="chromium" uses Chrome's newer headless mode: the full browser with no window, so it keeps real plugins and the real GPU
+    browser = p.chromium.launch(headless=True, channel="chromium")
+
+    #Headless still says "HeadlessChrome" in its user agent, so read the real one and drop the "Headless" part (keeps the right version and OS)
+    probe = browser.new_page()
+    user_agent = probe.evaluate("navigator.userAgent").replace("HeadlessChrome", "Chrome")
+    probe.close()
+
+    context = browser.new_context(user_agent=user_agent)
+    return browser, context.new_page()
 
 #Helper function to clear the run state left over from a previous run
 def reset_state():
