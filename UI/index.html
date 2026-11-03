@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HomeSweeper</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">🏠</span>
+            <h1>HomeSweeper</h1>
+        </div>
+        <div class="actions">
+            <span id="status" class="status status-idle">Idle</span>
+            <button id="scrape-btn" class="btn btn-primary">Start scrape</button>
+            <a id="export-btn" class="btn" href="/api/export">Export Excel</a>
+        </div>
+    </header>
+
+    <main>
+        <section class="stats">
+            <div class="stat"><span class="stat-value" id="stat-total">–</span><span class="stat-label">Listings stored</span></div>
+            <div class="stat"><span class="stat-value" id="stat-shown">–</span><span class="stat-label">Matching filters</span></div>
+            <div class="stat"><span class="stat-value" id="stat-phone">–</span><span class="stat-label">With phone number</span></div>
+            <div class="stat"><span class="stat-value" id="stat-last">–</span><span class="stat-label">Last scrape</span></div>
+        </section>
+
+        <section class="filters">
+            <input id="f-search" type="search" placeholder="Search title, description, address, phone…">
+            <select id="f-type"><option value="">All types</option></select>
+            <select id="f-city"><option value="">All cities</option></select>
+            <input id="f-min" type="number" min="0" placeholder="Min price">
+            <input id="f-max" type="number" min="0" placeholder="Max price">
+            <button id="f-clear" class="btn btn-ghost">Clear</button>
+        </section>
+
+        <section class="table-wrap">
+            <table id="listings">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th data-sort="title">Title</th>
+                        <th data-sort="price">Price</th>
+                        <th data-sort="listing_type">Type</th>
+                        <th data-sort="size_m2">m²</th>
+                        <th data-sort="rooms">Rooms</th>
+                        <th data-sort="city">City</th>
+                        <th data-sort="phone">Phone</th>
+                        <th data-sort="seller">Seller</th>
+                        <th data-sort="first_seen">First seen</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <p id="empty" class="empty" hidden>No listings yet — press <strong>Start scrape</strong> to fetch some.</p>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

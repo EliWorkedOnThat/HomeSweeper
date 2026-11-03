@@ -17,7 +17,8 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 - `Scraper/Output.py` — writes listings to `Output/listings.xlsx` (openpyxl).
 - `Scraper/config.py` — global settings shared by every scraper.
 - `Data/` — holds the SQLite database file (`Homesweeper.db`). Created automatically.
-- `Test/` — local dev utilities (`HTML-Analyzer.py`, `Test.py`). Ignored by Git and no longer tracked.
+- `Scraper/Server.py` + `UI/` — the local web UI (FastAPI + plain HTML/CSS/JS). See [Phase 2](#phase-2--local-web-ui).
+- `Tools/` — dev utilities. `FetchHTML.py` saves a URL's HTML to `Tools/HTML/` (ignored by Git). It replaces the old `Test/` folder, which has been deleted.
 - `Output/` — generated Excel output. Ignored by Git.
 - `Analyze.md` — scratch notes and HTML samples (currently MerrJep phone-button markup).
 
@@ -118,16 +119,27 @@ Browser (localhost:8000)  ──HTTP──▶  Python web server (FastAPI)
 
 Must-haves:
 1. **Scrapes run in a background thread.** A scrape takes minutes, so "Start scrape" returns immediately and the page polls `/api/scrape/status` every few seconds to show progress. Playwright's sync API also can't run inside FastAPI's async code, which is another reason it needs its own thread.
-2. **Only one scrape at a time.** Ignore or reject a second start while one is running.
+2. **Only one scrape at a time.** Ignore or reject a second start while one is running. **Done** with `SCRAPE_LOCK`; see [How the scrape lock works](#how-the-scrape-lock-works).
 3. **Bind to `127.0.0.1` only** so other devices on the network can't reach it. Open it up on purpose later if needed.
-4. **Double-click to start.** Add a `Start HomeSweeper.bat` that launches the server and opens the browser, so nobody needs a terminal.
-5. Before this phase, fix the module-level globals in the MerrJep scraper (see Known gotchas below). The server will call the scraper many times in one process.
+4. **Double-click to start (later).** The project must run on Windows, Linux and macOS, so there is no `.bat` for now. While testing, start the server from a console with `python3 -m Scraper.Server` (Windows: `py -3.14 -m Scraper.Server`). Add a cross-platform launcher once testing is done.
+5. ~~Fix the module-level globals in the MerrJep scraper~~ **Done.** `create_browser_instance()` calls `reset_state()` first, so every run starts fresh.
 
 Later: if several staff need the same data at once, run this same app on one office PC or server and have everyone open its address. That is also when we'd consider moving from SQLite to PostgreSQL.
 
+#### How the scrape lock works
+`Scraper/Server.py` has `SCRAPE_LOCK = threading.Lock()`. It is **not** there because of Python's GIL. You would need it even on a Python with no GIL.
+
+- **What the GIL does:** it only stops two threads from running Python bytecode at the exact same instant, which protects the interpreter's own internals. It doesn't stop two threads from both running the same scrape function. They'd just take turns, especially since Playwright spends most of its time waiting on the network and releases the GIL while it waits. (Python 3.14 also has an optional build without the GIL, but the standard `py -3.14` still has it, and it doesn't matter here either way.)
+- **What `SCRAPE_LOCK` does:** it's a rule for the app, "only one scrape at a time." Without it, clicking Start scrape twice, or opening two browser tabs, would start two scrape threads at once, and that causes three problems:
+  1. **The scraper's globals would clash.** `URL_QUEUE`, `PROCESSED_UPIDS`, `SCRAPED_LISTINGS` and `PAGE_COUNT` are module-level, so two runs would share them. Each run calls `reset_state()` at the start and would wipe the other's progress mid-scrape. Pages would be skipped or scraped twice, and the results would mix together.
+  2. **Traffic to the site.** Two browsers hitting MerrJep at once doubles the request rate and undoes the `Rest_Time` pacing, which raises the chance of being blocked.
+  3. **SQLite writes.** SQLite allows only one writer at a time. Two scrapes saving together would mostly just wait for each other, but it's needless contention.
+- **How it's used:** `SCRAPE_LOCK.acquire(blocking=False)` doesn't wait for the lock. If a scrape is already running, it fails immediately and `/api/scrape/start` returns a **409 "already running"** error. The lock is then held for the whole scrape and released in the `finally` block of `run_scrape()`, so it's freed even if the scrape crashes.
+- **Rule for new code:** anything that starts a scrape (a button, a timer, a new site) must go through this same lock. Never call `Engine.main()` from a second place without it.
+
 ### Phase 3 — More sites and polish
 1. Start the GazetaCelesi scraper using the same contract: a function that returns a list of listing dicts in the same shape, which the engine saves with `site="gazetacelesi"`.
-2. Use `Rotation_Rescraping_Time` to rescrape on a timer, either through the engine or a "schedule" option in the UI.
+2. **Automatic scraping mode**, assigned to Alex. See [For Alex's Claude](#for-alexs-claude).
 3. Add a `price_history` table so price changes are kept instead of overwritten.
 4. Move per-site settings such as the demo limit, headless mode and wait times into `config.py` where it makes sense.
 5. Replace the fixed `wait_for_timeout(5000)` with element-based waits.
@@ -137,15 +149,37 @@ Later: if several staff need the same data at once, run this same app on one off
 
 ## Repository housekeeping
 - `.gitignore` excludes test folders and files, Python caches and `Output/`. `Data/` still needs adding (Phase 1, step 1).
-- `Test/Test.py` has been removed from the index, so it is no longer tracked.
+- The old `Test/` folder has been deleted. Dev utilities now live in `Tools/`.
 
 ## For Alex's Claude
+
+### TODO (Alex): automatic scraping mode
+Right now a scrape only runs when someone presses **Start scrape** in the UI or runs `Scraper.Engine` by hand. We need an **automatic mode** that rescrapes on its own every `Rotation_Rescraping_Time` minutes (already in `Scraper/config.py`, currently unused), so staff always see fresh listings without touching anything.
+
+What it should do:
+- **On/off from the UI.** Add a toggle next to Start scrape that shows whether auto mode is on and when the next run is due. Manual Start scrape must keep working alongside it.
+- **Run inside the server.** Use a background thread in `Scraper/Server.py` that wakes up every `Rotation_Rescraping_Time` minutes. No OS schedulers (cron / Task Scheduler), because the app has to work the same on Windows, Linux and macOS.
+- **Use the existing scrape lock.** Each automatic run must start through `SCRAPE_LOCK.acquire(blocking=False)` and the same `run_scrape()` path as the button (see [How the scrape lock works](#how-the-scrape-lock-works)). If a scrape is already running when the timer fires, skip that round instead of queueing it.
+- **Count the wait from when a run finishes**, not from when it started, so a slow scrape never overlaps the next one or eats into the rest time.
+- **Stop cleanly.** Turning auto mode off, or pressing Ctrl+C on the server, should stop the timer. An in-progress scrape can finish.
+- **Show it in the status.** Extend `/api/scrape/status` (or add `/api/auto/status`) with whether auto mode is on, the last automatic run's result, and the time of the next run.
+
+Do these first, otherwise every automatic round rescrapes everything:
+- Phase 1, step 6: `get_known_upids(site)` in `DB.py`, so the scraper skips listings already in the database before clicking into them.
+- Probably run headless in auto mode (`headless=True`), so a Chrome window doesn't keep popping up on staff PCs.
+
+Nice to have:
+- Only run during working hours, with the hours set in `config.py`.
+- Add a little random jitter to the interval, so the requests don't arrive on an exact clock.
+- When there are more sites (GazetaCelesi), go through them one after another inside the same lock.
 
 
 ## To run the Engine use the following command:
 Run from the project root (needed for the `Scraper.` / `MerrJep_al.` imports):
 
-    py -3.14 -m Scraper.Engine
+    python3 -m Scraper.Engine        (Windows: py -3.14 -m Scraper.Engine)
+    python3 -m Scraper.Server        (web UI at http://127.0.0.1:8000)
+    python3 -m Tools.FetchHTML <url>
 
 Dependencies used: `playwright` (plus `playwright install chromium`), `openpyxl`, `rich`, `httpx`, `requests`, `beautifulsoup4`. Phase 2 adds `fastapi` and `uvicorn`.
 

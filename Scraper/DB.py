@@ -107,3 +107,26 @@ def save_listing(connection, listing, site):
     except sqlite.Error as e:
         print(f"[red]Error saving listing {row['upid']}: {e}[/red]")
         return False
+
+#Function to get the stored listings (newest first) for the UI and the Excel export, optionally only one site
+def get_listings(connection, site=None):
+    query = "SELECT * FROM listings"
+    params = ()
+    if site:
+        query += " WHERE site = ?"
+        params = (site,)
+    query += " ORDER BY last_seen DESC, id DESC"
+
+    try:
+        cursor = connection.cursor()
+        cursor.row_factory = sqlite.Row #Rows behave like dicts so we get column names
+        listings = []
+        for row in cursor.execute(query, params):
+            listing = dict(row)
+            listing["images"] = json.loads(listing["images"] or "[]") #Turn the JSON text back into a list
+            listing["attributes"] = json.loads(listing["attributes"] or "{}") #And back into a dict
+            listings.append(listing)
+        return listings
+    except sqlite.Error as e:
+        print(f"[red]Error reading listings: {e}[/red]")
+        return []

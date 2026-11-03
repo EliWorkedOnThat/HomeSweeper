@@ -5,7 +5,9 @@
 **/tests/
 **/*_test.py
 **/test_*.py
-Test/HTML-Files/
+
+# HTML pages saved by Tools/FetchHTML.py
+Tools/HTML/
 
 # Python cache
 __pycache__/

@@ -5,11 +5,12 @@ from Scraper.Output import save_listings as export_to_excel
 from Scraper.DB import connect_to_db, create_tables, save_listing
 
 #This will just call all the scripts at once its really not that difficult atm
+#Returns a small summary dict so the web UI can show what happened (None if the database couldn't be opened)
 def main():
     connection = connect_to_db()
     if connection is None:
         print("[red]Engine stopped: could not open the database.[/red]")
-        return
+        return None
 
     try:
         create_tables(connection)
@@ -23,6 +24,7 @@ def main():
 
         #Excel is just a report for now, if it fails the data is already safe in the database
         export_to_excel(listings, site="merrjep")
+        return {"found": len(listings), "saved": saved, "failed": len(listings) - saved}
     finally:
         connection.close()
 

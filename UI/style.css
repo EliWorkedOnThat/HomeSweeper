@@ -1,0 +1,132 @@
+/* Colours live here so the whole look can be changed in one place */
+:root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --border: #e2e5ea;
+    --text: #1d2430;
+    --muted: #6b7485;
+    --accent: #2563eb;
+    --accent-text: #ffffff;
+    --row-hover: #f0f4ff;
+    --ok: #15803d;
+    --warn: #b45309;
+    --err: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #12151b;
+        --surface: #1b2029;
+        --border: #2c3340;
+        --text: #e6e9ef;
+        --muted: #8d96a8;
+        --accent: #4f8cff;
+        --row-hover: #222a38;
+        --ok: #4ade80;
+        --warn: #fbbf24;
+        --err: #f87171;
+    }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+/* Top bar */
+.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand h1 { margin: 0; font-size: 20px; }
+.logo { font-size: 24px; }
+.actions { display: flex; align-items: center; gap: 10px; }
+
+/* Buttons */
+.btn {
+    display: inline-block;
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    text-decoration: none;
+    cursor: pointer;
+}
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn-ghost { background: transparent; }
+
+/* Scrape status pill */
+.status { padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; }
+.status-idle { color: var(--muted); }
+.status-running { color: var(--warn); }
+.status-done { color: var(--ok); }
+.status-error { color: var(--err); }
+
+main { padding: 20px 24px; max-width: 1500px; margin: 0 auto; }
+
+/* Stat cards */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.stat {
+    display: flex;
+    flex-direction: column;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+.stat-value { font-size: 22px; font-weight: 700; }
+.stat-label { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+/* Filters */
+.filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.filters input, .filters select {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+}
+#f-search { flex: 1 1 260px; }
+#f-min, #f-max { width: 120px; }
+
+/* Table */
+.table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
+th { position: sticky; top: 0; background: var(--surface); color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+th[data-sort] { cursor: pointer; user-select: none; }
+th[data-sort]:hover { color: var(--text); }
+th.sorted-asc::after { content: " ▲"; }
+th.sorted-desc::after { content: " ▼"; }
+tbody tr:hover { background: var(--row-hover); }
+td a { color: var(--accent); text-decoration: none; }
+td a:hover { text-decoration: underline; }
+.thumb { width: 64px; height: 48px; object-fit: cover; border-radius: 6px; display: block; background: var(--border); }
+.title-cell { max-width: 360px; }
+.nowrap { white-space: nowrap; }
+.muted { color: var(--muted); }
+.empty { padding: 40px; text-align: center; color: var(--muted); margin: 0; }
+
+@media (max-width: 700px) {
+    .topbar, main { padding-left: 16px; padding-right: 16px; }
+}

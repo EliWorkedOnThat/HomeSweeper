@@ -1,5 +1,6 @@
 #This file will act as the output handler for each scraper
 #Imports
+from io import BytesIO
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from rich import print
@@ -70,3 +71,24 @@ def save_listings(listings, site):
 
     print(f"[green]Saved {added} new listings to {OUTPUT_FILE} ({len(listings) - added} already existed)[/green]")
     return added
+
+#Function to build a fresh workbook in memory from database listings (used by the UI download, so an open Excel file can't block it)
+def build_workbook(listings):
+    rows = [flatten_listing(listing, listing.get("site")) for listing in listings]
+
+    headers = list(BASE_COLUMNS)
+    for row in rows:
+        for key in row:
+            if key not in headers:
+                headers.append(key)
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = SHEET_NAME
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([row.get(header) for header in headers])
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()

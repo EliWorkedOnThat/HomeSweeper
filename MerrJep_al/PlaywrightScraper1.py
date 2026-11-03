@@ -26,6 +26,7 @@ ATTRIBUTE_COLUMNS = {
 
 #Function to create a browser instance
 def create_browser_instance():
+    reset_state() #Start fresh every run, otherwise a second run (e.g. from the UI) continues where the last one stopped
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         page = browser.new_page()
@@ -48,8 +49,16 @@ def create_browser_instance():
             browser.close()
             print(f"[green]Total unique properties scraped: {len(SCRAPED_LISTINGS)}[/green]")
 
-    #Hand the scraped listings back to whoever called this function (Engine.py)
-    return SCRAPED_LISTINGS
+    #Hand a copy of the scraped listings back to whoever called this function (Engine.py)
+    return list(SCRAPED_LISTINGS)
+
+#Helper function to clear the run state left over from a previous run
+def reset_state():
+    global PAGE_COUNT
+    PAGE_COUNT = 1
+    URL_QUEUE.clear()
+    PROCESSED_UPIDS.clear()
+    SCRAPED_LISTINGS.clear()
 
 #Helper function to check if we hit the scrape limit while in demo mode
 def demo_limit_reached():
