@@ -483,12 +483,62 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
 .fchip-clear { border-color: var(--border); background: transparent; color: var(--muted); font-weight: 500; }
 
 /* ---------- Listing cards ---------- */
-/* Flex grid: each card wants 340px, rows wrap, and the max-widths keep every card in a row the same width */
-.cards { display: flex; flex-wrap: wrap; gap: 18px; align-items: stretch; }
+/* One horizontal strip per page. Every card has the same width and height (--card-w / --card-h);
+   whatever doesn't fit fades out at the bottom and is one click away in "Të gjitha detajet". */
+.cards-wrap {
+    --card-w: 340px;
+    --card-h: 720px;
+    position: relative;
+    min-width: 0;
+}
+.cards {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 18px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+    scroll-padding: 0 4px;
+    padding: 4px 4px 14px; /* Room for the hover lift and the shadow, so neither is clipped */
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+}
+.cards::-webkit-scrollbar { height: 10px; }
+.cards::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; border: 2px solid var(--bg); }
+.cards::-webkit-scrollbar-track { background: transparent; }
+
+/* ‹ › arrows on the sides of the strip (hidden on touch screens, where you swipe) */
+.strip-nav {
+    position: absolute;
+    z-index: 5;
+    top: calc(var(--card-h) / 2 - 22px);
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 24px;
+    line-height: 1;
+    box-shadow: var(--shadow-lg);
+    cursor: pointer;
+    transition: opacity 0.15s, border-color 0.15s;
+}
+.strip-nav:hover { border-color: var(--accent); color: var(--accent); }
+.strip-nav:disabled { opacity: 0; pointer-events: none; }
+.strip-prev { left: -10px; }
+.strip-next { right: -10px; }
+.cards-wrap.fits .strip-nav { display: none; }
+@media (pointer: coarse) { .strip-nav { display: none; } }
+
 .card {
-    flex: 1 1 340px;
-    min-width: 0; /* Lets the card shrink below its content on small screens instead of overflowing */
-    max-width: 100%;
+    flex: 0 0 var(--card-w);
+    width: var(--card-w);
+    height: var(--card-h);
+    min-width: 0;
+    scroll-snap-align: start;
     display: flex;
     flex-direction: column;
     background: var(--surface);
@@ -499,10 +549,52 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s;
 }
 .card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); border-color: var(--border-strong); }
-@media (prefers-reduced-motion: reduce) { .card, .card:hover { transition: none; transform: none; } }
-@media (min-width: 760px)  { .card { max-width: calc((100% - 18px) / 2); } }
-@media (min-width: 1100px) { .card { max-width: calc((100% - 2 * 18px) / 3); } }
-@media (min-width: 1460px) { .card { max-width: calc((100% - 3 * 18px) / 4); } }
+@media (prefers-reduced-motion: reduce) { .card, .card:hover { transition: none; transform: none; } .cards { scroll-behavior: auto; } }
+
+/* ---------- Pagination ---------- */
+.pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px 16px;
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+.pager-info { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.pager-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; min-width: 0; }
+.pager-btn {
+    min-width: 36px;
+    height: 36px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: border-color 0.15s, background-color 0.15s;
+}
+.pager-btn:hover:not(:disabled):not(.on) { border-color: var(--accent); color: var(--accent); }
+.pager-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pager-btn.on { border-color: var(--accent); background: var(--accent); color: var(--accent-text); cursor: default; }
+.pager-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pager-gap { padding: 0 2px; color: var(--muted); }
+.pager-size {
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+}
 
 .card-photo {
     position: relative;
@@ -572,6 +664,7 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
 .card-body {
     flex: 1 1 auto;
     min-width: 0;
+    min-height: 0; /* Lets .facts shrink so the footer always stays inside the fixed-height card */
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -616,7 +709,19 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
     white-space: nowrap;
 }
 
-.facts { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+/* Takes whatever height is left in the fixed-size card; anything beyond that fades out */
+.facts {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 8px;
+    min-width: 0;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(#000 calc(100% - 28px), transparent);
+}
 
 /* ---------- Boxes (one per piece of info) ---------- */
 .box {
@@ -678,7 +783,10 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
     border-top: 1px solid var(--border);
 }
 .card-id { min-width: 0; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card-links { display: flex; flex-wrap: wrap; gap: 6px; }
+/* The three buttons share one row, so every card keeps the same room for its content */
+.card-links { flex: 1 1 100%; display: flex; gap: 6px; min-width: 0; }
+.card-links .btn { flex: 1 1 auto; min-width: 0; padding: 7px 8px; overflow: hidden; }
+.card-links .btn span { overflow: hidden; text-overflow: ellipsis; }
 .card-links .icon { width: 14px; height: 14px; }
 
 .empty {
@@ -798,8 +906,15 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
     .ms:nth-child(even) .ms-panel { left: auto; right: 0; } /* Right column opens leftwards so it stays on screen */
     .ranges { grid-template-columns: 1fr; }
     .card:hover { transform: none; }
+    .cards-wrap { --card-w: calc(100vw - 72px); --card-h: 740px; } /* The next card peeks in from the right, so it's clear you can swipe */
+    .cards { gap: 12px; margin: 0 -16px; padding: 4px 16px 14px; scroll-padding: 0 16px; } /* Strip runs to the screen edges */
+    .pager { justify-content: center; }
+    .pager-info { flex-basis: 100%; text-align: center; }
 }
 @media (max-width: 360px) {
+    .card-links .btn-call span, .card-links a[aria-label] span { display: none; } /* Icons only, the buttons keep their titles */
+    .card-links .btn-call, .card-links a[aria-label] { flex: 0 0 40px; }
+    .card-links .btn-primary { flex: 1 1 auto; }
     .stat { flex-basis: 100%; }
     .ms { flex-basis: 100%; }
     .ms:nth-child(even) .ms-panel { left: 0; right: auto; }

@@ -98,7 +98,13 @@
             <div id="active-filters" class="active-filters" hidden></div>
         </section>
 
-        <section id="cards" class="cards"></section>
+        <!-- One page of listings in a horizontal strip, same-size cards, with the page buttons underneath -->
+        <div id="cards-wrap" class="cards-wrap">
+            <button id="cards-prev" class="strip-nav strip-prev" type="button" aria-label="Njoftimet e mëparshme" title="Njoftimet e mëparshme">‹</button>
+            <section id="cards" class="cards" aria-label="Njoftimet"></section>
+            <button id="cards-next" class="strip-nav strip-next" type="button" aria-label="Njoftimet e tjera" title="Njoftimet e tjera">›</button>
+        </div>
+        <nav id="pager" class="pager" aria-label="Faqet e njoftimeve" hidden></nav>
         <p id="empty" class="empty" hidden>Ende nuk ka njoftime — shtyp <strong>▶ Nis mbledhjen</strong> për të marrë të parat.</p>
         <p id="no-match" class="empty" hidden>Asnjë njoftim nuk përputhet me këta filtra.</p>
     </main>

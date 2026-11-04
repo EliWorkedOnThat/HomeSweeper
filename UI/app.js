@@ -175,7 +175,7 @@ async function loadListings() {
     computeBounds();
     FACETS.forEach(fillFacetOptions);
     RANGES.forEach((r) => syncRange(r));
-    render();
+    draw();
 }
 
 // ---------- Deriving filter fields ----------
@@ -679,20 +679,101 @@ function sortListings(listings) {
 
 // ---------- Drawing the cards ----------
 
+// Pagination: the matching listings are split into pages, one page sits in the horizontal strip
+const PAGE_SIZES = [12, 24, 48];
+let page = 1;
+let pageSize = PAGE_SIZES[0];
+
+// A filter or sort change starts again from page 1
 function render() {
+    page = 1;
+    draw();
+}
+
+// Draw the current page. Used directly when new listings arrive, so the agent stays on the page they're reading.
+function draw() {
     const listings = sortListings(filteredListings());
-    $("cards").replaceChildren(...listings.map(buildCard));
+    const pages = Math.max(1, Math.ceil(listings.length / pageSize));
+    page = Math.min(Math.max(1, page), pages);
+    const start = (page - 1) * pageSize;
+    $("cards").replaceChildren(...listings.slice(start, start + pageSize).map(buildCard));
+    $("cards").scrollLeft = 0;
+    renderPager(listings.length, pages, start);
     updateFacetCounts();
     renderActive();
     renderPresets(RANGES.find((r) => r.id === "price")); // Its buttons follow the "Lloji" filter
 
     $("empty").hidden = allListings.length > 0;
     $("no-match").hidden = allListings.length === 0 || listings.length > 0;
+    $("cards-wrap").hidden = listings.length === 0;
     $("stat-total").textContent = formatNumber(allListings.length);
     $("stat-shown").textContent = formatNumber(listings.length);
     $("stat-phone").textContent = formatNumber(allListings.filter((l) => l.phone).length);
 
-    requestAnimationFrame(() => markOverflow($("cards"))); // Measure once the cards are laid out
+    requestAnimationFrame(() => {
+        markOverflow($("cards")); // Measure once the cards are laid out
+        updateStripNav();
+    });
+}
+
+function goToPage(n) {
+    page = n;
+    draw();
+    $("cards-wrap").scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+// "1–12 nga 150", ‹ 1 … 4 5 6 … 13 ›, and how many per page
+function renderPager(total, pages, start) {
+    const pager = $("pager");
+    pager.hidden = total === 0;
+    if (!total) return;
+
+    const info = el("span", "pager-info", `${formatNumber(start + 1)}–${formatNumber(Math.min(start + pageSize, total))} nga ${formatNumber(total)}`);
+
+    const nav = el("div", "pager-pages");
+    const button = (label, target, { current = false, aria } = {}) => {
+        const b = el("button", `pager-btn${current ? " on" : ""}`, label);
+        b.type = "button";
+        b.disabled = target < 1 || target > pages;
+        if (current) b.setAttribute("aria-current", "page");
+        b.setAttribute("aria-label", aria || `Faqja ${target}`);
+        if (!current) b.addEventListener("click", () => goToPage(target));
+        return b;
+    };
+    nav.append(button("‹", page - 1, { aria: "Faqja e mëparshme" }));
+    // Always the first and last page, plus two either side of the current one
+    const shown = [...new Set([1, page - 2, page - 1, page, page + 1, page + 2, pages])].filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b);
+    shown.forEach((n, i) => {
+        if (i && n - shown[i - 1] > 1) nav.append(el("span", "pager-gap", "…"));
+        nav.append(button(formatNumber(n), n, { current: n === page }));
+    });
+    nav.append(button("›", page + 1, { aria: "Faqja tjetër" }));
+
+    const size = el("select", "pager-size");
+    size.setAttribute("aria-label", "Njoftime për faqe");
+    PAGE_SIZES.forEach((n) => size.append(new Option(`${n} për faqe`, String(n))));
+    size.value = String(pageSize);
+    size.addEventListener("change", () => {
+        const first = (page - 1) * pageSize; // Keep the first listing on screen in view
+        pageSize = Number(size.value);
+        goToPage(Math.floor(first / pageSize) + 1);
+    });
+
+    pager.replaceChildren(info, nav, size);
+}
+
+// The ‹ › arrows on the strip scroll one screen of cards, and grey out at either end
+function scrollStrip(direction) {
+    const strip = $("cards");
+    strip.scrollBy({ left: direction * strip.clientWidth * 0.9, behavior: "smooth" });
+}
+
+function updateStripNav() {
+    const strip = $("cards");
+    const max = strip.scrollWidth - strip.clientWidth;
+    $("cards-prev").disabled = strip.scrollLeft <= 2;
+    $("cards-next").disabled = strip.scrollLeft >= max - 2;
+    $("cards-wrap").classList.toggle("fits", max <= 2); // Everything visible, no arrows needed
 }
 
 // One labelled box of info. Text is cut after `lines` lines; if that hides anything the box opens a preview.
@@ -838,12 +919,13 @@ function buildCard(l) {
     // Every other scraped field gets its own box
     const facts = el("div", "facts");
     facts.append(
+        // Most useful first: the card has a fixed height, so the last boxes fade out (all of it is in "Detajet")
         box("Telefoni", l.phone),
         box("Shitësi", l.seller),
+        box("Përshkrimi", l.description, { lines: 3, wide: true }),
         box("Publikuar", joinParts(l.published_date, l.published_time)),
         box("Parë për herë të parë", localTime(l.first_seen)),
         box("Parë për herë të fundit", localTime(l.last_seen)),
-        box("Përshkrimi", l.description, { lines: 4, wide: true }),
         tagsBox(l.attributes),
     );
 
@@ -856,15 +938,19 @@ function buildCard(l) {
         const call = el("a", "btn btn-small btn-call");
         call.href = `tel:${tel}`;
         call.title = `Telefono ${tel}`;
+        call.setAttribute("aria-label", `Telefono ${tel}`);
         call.append(icon("phone"), el("span", null, "Telefono"));
         links.append(call);
     }
     if (l.url) {
         const open = externalLink("btn btn-small", null, l.url);
         open.append(el("span", null, "Hap në faqe"), icon("external"));
+        open.title = "Hap njoftimin në faqen origjinale";
+        open.setAttribute("aria-label", "Hap në faqe");
         links.append(open);
     }
-    const details = el("button", "btn btn-small btn-primary", "Të gjitha detajet");
+    const details = el("button", "btn btn-small btn-primary", "Detajet");
+    details.title = "Të gjitha detajet e njoftimit";
     details.addEventListener("click", () => openDetails(l));
     links.append(details);
     footer.append(links);
@@ -1241,7 +1327,14 @@ document.addEventListener("keydown", (e) => {
 });
 
 // Re-check which boxes are cut off when the window size changes
-window.addEventListener("resize", debounce(() => markOverflow($("cards")), 150));
+window.addEventListener("resize", debounce(() => {
+    markOverflow($("cards"));
+    updateStripNav();
+}, 150));
+
+$("cards-prev").addEventListener("click", () => scrollStrip(-1));
+$("cards-next").addEventListener("click", () => scrollStrip(1));
+$("cards").addEventListener("scroll", debounce(updateStripNav, 60), { passive: true });
 
 $("scrape-btn").addEventListener("click", toggleAuto);
 $("auto-interval").addEventListener("change", changeAutoInterval);
