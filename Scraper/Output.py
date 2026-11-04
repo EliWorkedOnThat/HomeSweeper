@@ -3,6 +3,7 @@
 from io import BytesIO
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from rich import print
 
 #Global Variables
@@ -12,6 +13,7 @@ BASE_COLUMNS = [
     "site", "upid", "title", "price", "currency", "seller", "phone",
     "published_date", "published_time", "url", "description", "images",
 ]
+MAX_CELL_LENGTH = 32767 #Excel's limit per cell, longer text makes Excel say the file is damaged when it's opened
 
 #Helper function to open the workbook or create it with headers if it doesn't exist yet
 def open_workbook():
@@ -23,16 +25,32 @@ def open_workbook():
     workbook = Workbook()
     del workbook["Sheet"] #Remove the default empty sheet openpyxl creates
     sheet = workbook.create_sheet(SHEET_NAME)
-    sheet.append(BASE_COLUMNS)
+    append_row(sheet, BASE_COLUMNS)
     return workbook, sheet
 
-#Helper function to turn one listing dict into a flat row (attributes get their own columns)
+#Helper function to make a scraped value safe for an Excel cell: openpyxl refuses control characters like \x0b (it raises
+#IllegalCharacterError, which would break the whole file), so they are removed, and text is cut to Excel's cell limit
+def clean_cell(value):
+    if not isinstance(value, str):
+        return value
+    return ILLEGAL_CHARACTERS_RE.sub("", value)[:MAX_CELL_LENGTH]
+
+#Helper function to add one row to a sheet as plain values: openpyxl turns any text starting with "=" into a live formula,
+#and sellers write their own titles and descriptions, so "=HYPERLINK(...)" would become a working link in the agent's Excel.
+#Those cells are switched back to text, so Excel shows exactly what the seller wrote and never runs it (we never write real formulas)
+def append_row(sheet, values):
+    sheet.append(values)
+    for cell in sheet[sheet.max_row]:
+        if cell.data_type == "f":
+            cell.data_type = "s"
+
+#Helper function to turn one listing dict into a flat row (attributes get their own columns), every value and column name cleaned
 def flatten_listing(listing, site):
     row = {key: listing.get(key) for key in BASE_COLUMNS}
     row["site"] = site
     row["images"] = "\n".join(listing.get("images") or [])
     row.update(listing.get("attributes") or {})
-    return row
+    return {clean_cell(str(key)): clean_cell(value) for key, value in row.items()}
 
 #Function to append scraped listings to the excel file, skipping ones already saved
 def save_listings(listings, site):
@@ -59,7 +77,7 @@ def save_listings(listings, site):
                 headers.append(key)
                 sheet.cell(row=1, column=len(headers), value=key)
 
-        sheet.append([row.get(header) for header in headers])
+        append_row(sheet, [row.get(header) for header in headers])
         saved.add((site, str(row["upid"])))
         added += 1
 
@@ -85,9 +103,9 @@ def build_workbook(listings):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = SHEET_NAME #type: ignore
-    sheet.append(headers) #type: ignore
+    append_row(sheet, headers)
     for row in rows:
-        sheet.append([row.get(header) for header in headers]) #type: ignore
+        append_row(sheet, [row.get(header) for header in headers])
 
     buffer = BytesIO()
     workbook.save(buffer)

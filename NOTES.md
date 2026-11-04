@@ -136,6 +136,9 @@ The `listings` table:
 - Each attribute key gets its own column, and new keys add new columns.
 - It skips rows whose `(site, upid)` is already in the sheet.
 - If the file is open in Excel, it prints a warning instead of crashing.
+- Every cell goes through `clean_cell()`: control characters such as `` are removed (openpyxl raises `IllegalCharacterError` on them, which used to break the whole file) and text is cut to Excel's 32,767-character limit. Fixed 2026-11-04: before this, one such character in a scraped listing failed the turn after the first site and broke the UI's Excel download for good.
+- Rows are added with `append_row()`, which turns any cell openpyxl made a formula (text starting with `=`) back into plain text. Sellers write their own titles and descriptions, so `=HYPERLINK(...)` would otherwise become a working link in the agent's Excel. The text is kept exactly as written (no `'` prefix, which would show up in phone numbers like `+355…`). We never write real formulas. Fixed 2026-11-04.
+- The Engine wraps the per-turn Excel save in `try`/`except`, so an Excel problem (bad character, renamed sheet, damaged file) is logged and never stops a turn. The data is already in the DB by then.
 
 ## To do next (prioritized, 2026-11-04)
 The phases below hold the long-term plan. This is the short list of what to pick up next, most important first.

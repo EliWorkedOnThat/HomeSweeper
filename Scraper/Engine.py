@@ -60,8 +60,11 @@ def run_site(connection, site, scrape, skip_agencies, should_stop):
     saved = sum(save_listing(connection, listing, site=site) for listing in listings)
     print(f"[green]Database ({site}): {saved} saved, {len(listings) - saved} failed[/green]")
 
-    #Excel is just a report for now, if it fails the data is already safe in the database
-    export_to_excel(listings, site=site)
+    #Excel is just a report for now, if it fails the data is already safe in the database, so it must never stop the turn
+    try:
+        export_to_excel(listings, site=site)
+    except Exception as error:
+        print(f"[red]Excel export for {site} failed, the listings are still saved in the database: {error}[/red]")
     return {"found": len(listings), "saved": saved, "failed": len(listings) - saved}
 
 if __name__ == "__main__":

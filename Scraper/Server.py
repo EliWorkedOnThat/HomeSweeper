@@ -105,7 +105,7 @@ def run_scrape(preferences):
             #The wait is counted from when a run finishes, so a slow scrape never overlaps the next one
             #A turn cut short by pause, then resumed with play before it ended, goes again straight away
             if AUTO["enabled"]:
-                cut_short = (outcome.get("result") or {}).get("paused")
+                cut_short = (outcome.get("result") or {}).get("paused") #type: ignore
                 AUTO["next_run"] = finished if cut_short else finished + timedelta(minutes=AUTO["interval_minutes"])
         SCRAPE_LOCK.release()
         AUTO_WAKE.set()
