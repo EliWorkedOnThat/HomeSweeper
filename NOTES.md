@@ -14,7 +14,10 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 - `GazetaCelesi/` — Gazeta Celesi scrapers.
   - `PlaywrightScraper.py` — the working scraper. Exposes `scrape_gazetacelesi(skip_agencies=False, known_upids=(), should_stop=None)`, which runs one turn and returns a list of listing dicts. See [Gazeta Celesi scraper](#gazetacelesial-scraper-working-v1).
   - `Request.py` — empty placeholder.
-- `Scraper/Engine.py` — orchestrator. Runs every site in `SCRAPERS` one after another (MerrJep, then Gazeta Celesi) and saves each site's results with its own site key. A crash in one site is logged and the next site still runs. Returns `{found, saved, failed, sites: {site: {...}}}`.
+- `Duashpi_al/` — Duashpi.al scrapers (underscore, not hyphen, so it imports as a Python package).
+  - `PlaywrightScraper2.py` — the working scraper. Exposes `scrape_duashpi_al(skip_agencies=False, known_upids=(), should_stop=None)`, which runs one turn and returns a list of listing dicts. See [Duashpi scraper](#duashpial-scraper-working-v1).
+  - `Request2.py` — empty placeholder.
+- `Scraper/Engine.py` — orchestrator. Runs every site in `SCRAPERS` one after another (MerrJep, then Gazeta Celesi, then Duashpi) and saves each site's results with its own site key. A crash in one site is logged and the next site still runs. Returns `{found, saved, failed, sites: {site: {...}}}`.
 - `Scraper/DB.py` — the only file that talks to the database (SQLite). See [Database](#database-scraperdbpy).
 - `Scraper/Output.py` — writes listings to `Output/listings.xlsx` (openpyxl).
 - `Scraper/config.py` — global settings shared by every scraper.
@@ -27,7 +30,7 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 ## Current state
 
 ### MerrJep.al scraper (working, v1)
-- Page URLs come from `page_url(n)`: `BASE_URL` for page 1, then `BASE_URL?Page=N`. It runs in [turns](#turn-based-scraping-both-sites) and stops when a page has no listing cards.
+- Page URLs come from `page_url(n)`: `BASE_URL` for page 1, then `BASE_URL?Page=N`. It runs in [turns](#turn-based-scraping-all-sites) and stops when a page has no listing cards.
 - On each results page it collects unique `data-product-id` values (UPIDs), drops the ones already seen, then opens each new listing, scrapes it and goes back.
 - On each listing page it pulls:
   - JSON-LD `Product` data: title, price, currency, description and images. If a listing has no JSON-LD, it is skipped.
@@ -54,10 +57,31 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 - Condition wording differs by site (`E re` here, `I ri` on MerrJep) and is not merged yet.
 - Plain HTTP also returns `__NEXT_DATA__` (tested with `FetchHTML --fast`), so `Request.py` with HTTPX could replace Playwright for this site later. **Not yet:** a bare HTTP client is easy for the site to spot (no JS, no scrolling, no browser fingerprint), so for now we stay with Playwright.
 
-### Turn-based scraping (both sites)
+### Duashpi.al scraper (working, v1)
+- Works like MerrJep: results cards are short, so each **new** listing is opened (scroll to the card with `scan_card()`, click, read, `go_back()`), resting `Rest_Time` + up to 2 s between listings and between pages. Results: `https://duashpi.al/kerko-prona?sort=new&page=N`; the last page is the highest `a[data-page]` (4651 on 2026-11-04).
+- **Cookie popup:** a "Cookies dhe privatësia" banner with a full-page `#backdrop` blocks every click. `accept_cookies()` clicks `#acceptAllButton` ("Prano dhe Mbyll") once per turn, after a short pause. If clicks start timing out with "intercepts pointer events", check this first.
+- **Premium cards are ignored.** A page has ~30 normal cards (newest first) and ~78 premium cards mixed in between, not in date order and repeated across pages (`href` ends in `?pt=N`). `LISTING_SELECTOR` (`a.property-item-list-v2:not(:has(.premium-badge))`) keeps only the normal ones. Premium listings also show up as normal cards, so nothing is lost.
+- UPID = the hex id in the url (`/prona/<upid>/<slug>.html`), checked against the opened page's url.
+- **Cards move while we work.** New posts arrive every minute, so during the ~5 min it takes to open a page's 30 listings, the last cards get pushed onto the next page. Before each click the scraper checks the card is still there; if not, it is left unmarked (not failed) and gets picked up on the next page. Without this check every moved card waited out a 30 s click timeout and was wrongly added to `FAILED_UPIDS`. Clicks use `CLICK_TIMEOUT_MS` (10 s).
+- Listing page: JSON-LD `Product` gives the description (title comes from the `h1`, which has no emoji). The seller is a second JSON-LD block, `LocalBusiness` (category "Real Estate Agency") for agency accounts, `RealEstateAgent` for everyone else; its `name` → `seller`, its `telephone` + the "Telefono …" button → `phone` via `combine_phones()`.
+- **Price comes from the page, not the JSON-LD**: the JSON-LD converts LEK to EUR (40,000 LEK → 440 EUR). `parse_price()` reads `500 € / në muaj` / `12,000,000 LEK` → `EUR`/`ALL`; "Cmimi sipas kerkeses." → `None`.
+- Date: the relative badge ("8 orë më parë") has the exact time in its `title` (`04/11/2026 12:34`), saved as `published_date`/`published_time` in Gazeta's format. The badge before it is the type: `Me qera` → `Jepet me qera`, `Për shitje` → `Shitet`.
+- Facts under the title (`75 m²`, `2 Dhoma gjumi`, `1 Tualet`, `Kati 5`, `DSH-…`) go to `attributes` under fixed names (`FACT_LABELS`, the label changes with the count), plus `Detaje të tjera` (the tag list), `Kategoria` (breadcrumb) and `Nr. liçensës`. The view count is dropped. `Sipërfaqe` → `size_m2`, `Dhoma gjumi` → `rooms`. There's no condition field (`condition = None`).
+- Location `Rruga 5 Maji, Tirane` → `city = Tiranë` (`CITY_NAMES`), `address = Rruga 5 Maji`.
+- **Agencies** = `LocalBusiness` seller or a licensed-agent box (`a[href*="/profili/"]` with "Agjent i liçensuar") → `posted_by = Kompani`; everyone else gets `None` (an agency posting from a personal account looks private). Neither marker is on the card, so with "Jo Listime Agjensie" on, each agency listing costs one page load before it's skipped (then it's in `AGENCY_UPIDS`). Page 1 is mostly agencies, so that mode is slow on this site.
+- **Tested 2026-11-04** (scraper on its own, no DB, `Headless = False`):
+  - Demo turns of 2 and 5 listings worked.
+  - One full non-demo turn of 50 took **6 minutes** (~7 s per listing): 27 from page 1, then on to page 2 for the other 23.
+  - 0 failed, 0 duplicates. 3 cards pushed off page 1 by new posts were skipped there and picked up on page 2.
+  - Every listing had title, description, phone, seller, date and time, type, m², rooms, city, address and photos (3–18 each).
+  - Price was missing on only 1 of 50: "Çmimi: Për informacion, kontaktoni!", which is correct. Currencies were 30 `ALL` and 19 `EUR`.
+  - `posted_by` was 36 `Kompani` and 14 empty.
+- **Not tested yet:** "Jo Listime Agjensie" on Duashpi, a full Engine turn with all three sites saving to the DB, and headless mode on this site.
+
+### Turn-based scraping (all sites)
 A run is **one turn**, not a full crawl. Each turn, every site in `Engine.SCRAPERS` scrapes up to `Listings_Per_Turn` (50 in `config.py`, 5 in demo) **new** listings, which the Engine saves before starting the next site. Play in the UI repeats turns, with a break in between, until paused (see [Automatic scraping](#automatic-scraping)). `python3 -m Scraper.Engine` runs a single turn. A turn ends when the site has given 50 new listings, runs out of pages, or the user pauses, so a single turn can't run forever.
 - `DB.get_known_upids(connection, site)` is passed to each scraper as `known_upids`. Known listings are skipped **before** clicking (MerrJep) or mapping (Gazeta). Each page logs "N new, M already seen".
-- Every turn starts at **page 1**, so fresh posts are always picked up first (both sites list newest first). When a page has nothing new, the turn has caught up and jumps to `RESUME_PAGE`, the deepest page any turn has reached, to keep filling in older listings. Each turn digs a little deeper. Once everything is caught up, a turn is only a few page loads.
+- Every turn starts at **page 1**, so fresh posts are always picked up first (every site lists newest first). When a page has nothing new, the turn has caught up and jumps to `RESUME_PAGE`, the deepest page any turn has reached, to keep filling in older listings. Each turn digs a little deeper. Once everything is caught up, a turn is only a few page loads.
 - Kept in memory between turns (module globals that `reset_state()` doesn't clear): `RESUME_PAGE`, `AGENCY_UPIDS` (agency cards skipped by "Jo Listime Agjensie", so they don't look new every turn) and `FAILED_UPIDS` (listings that errored, not retried until restart, so one broken listing can't stop a page from counting as caught up).
 - **Restart caveat:** after a restart `RESUME_PAGE` is back to 1, so the first turn walks through saved pages (no clicks, but MerrJep still waits 5 s per page) until it finds 50 new listings. Fix: save `RESUME_PAGE` per site in `settings.json` (Phase 4, step 4).
 - Known listings are no longer re-scraped, so `last_seen` now means "last scraped", not "still online", and price changes on known listings aren't picked up. A `price_history` re-check pass is a Phase 3 topic.
@@ -117,17 +141,18 @@ The `listings` table:
 The phases below hold the long-term plan. This is the short list of what to pick up next, most important first.
 
 **Before agents use it for real**
-1. **Set `Headless = True` and `Demo_Environment = False`** in `config.py` and do a long real run, for an hour or more, with play on and a 1–5 min break. Watch for blocks or captchas, slow turns, and listings that fail. Nothing has run longer than a few demo turns yet.
+1. **Set `Headless = True` and `Demo_Environment = False`** in `config.py` and do a long real run, for an hour or more, with play on and a 1–5 min break. Watch for blocks or captchas, slow turns, and listings that fail. The longest run so far is one full Duashpi turn (50 listings, 6 min, no problems); MerrJep and Gazeta have only had demo turns. A full turn of all three sites will take roughly 15 min, because MerrJep and Duashpi open every listing.
+   - Also test Duashpi with "Jo Listime Agjensie" on (expect it to be slow), and run a full Engine turn so all three sites save to the DB.
 2. **Persist the runtime state** to `settings.json`: play on/off, the break, "Jo Listime Agjensie", and each site's `RESUME_PAGE`. Today a restart pauses scraping and loses the backfill position (Phase 4, step 4).
 3. **Live progress in the UI.** Show "site X, page N, M new so far" during a turn. The status currently only says running/done.
 4. **Working hours.** Only scrape between set hours, so the PC isn't scraping at night.
 
 **Data quality**
 
-5. **Normalise `published_date`** to ISO (`2026-10-03`) for both sites. MerrJep uses Albanian month abbreviations and Gazeta uses `04/11/2026`.
-6. **Merge the condition wording** across sites (`I ri` on MerrJep, `E re` on Gazeta, …), and check `Person privat` against MerrJep's real private-seller wording once one shows up.
+5. **Normalise `published_date`** to ISO (`2026-10-03`) for every site. MerrJep uses Albanian month abbreviations, while Gazeta and Duashpi use `04/11/2026`.
+6. **Merge the condition wording** across sites (`I ri` on MerrJep, `E re` on Gazeta, …), and check `Person privat` against MerrJep's real private-seller wording once one shows up. Duashpi has no condition field; its tags (`I rinovuar`, `E mobiluar`…) are in `attributes["Detaje të tjera"]` and could be mapped later.
 7. **`price_history` plus a re-check pass.** Saved listings are never re-scraped, so price changes and removed listings go unnoticed. Gazeta is cheap to re-check, because its results JSON already has the price.
-8. **Cross-site duplicates.** The same property posted on both sites, or re-posted under a new ID, is stored twice. A fuzzy match on phone + size + price could flag them.
+8. **Cross-site duplicates.** The same property posted on more than one site, or re-posted under a new ID, is stored twice. A fuzzy match on phone + size + price could flag them.
 
 **Code health**
 
@@ -155,7 +180,7 @@ The phases below hold the long-term plan. This is the short list of what to pick
    - `save_listing(listing, site)` inserts a new listing. If it already exists, it updates `last_seen` and the fields that can change (price, phone, description). Use `INSERT ... ON CONFLICT(site, upid) DO UPDATE`. Store `images` and `attributes` with `json.dumps`.
    - `get_listings(site=None)` returns the stored listings for the export, the UI and, later, the agents.
 5. ~~In `Engine.py`, call `connect_to_db()` and `create_tables()` once at startup, then save each listing with `save_listing()`~~ **Done.**
-6. ~~Skip known UPIDs before clicking~~ **Done** for both sites (the Engine passes `get_known_upids(site)` to each scraper).
+6. ~~Skip known UPIDs before clicking~~ **Done** for every site (the Engine passes `get_known_upids(site)` to each scraper).
 7. **Still open:** change `Output.py` to build the Excel file from `get_listings()`. (The UI's export download already does; the engine's per-turn append to `Output/listings.xlsx` doesn't.) The database is the main store and Excel is a report. If Excel is open, only the export fails and the scraped data is already safe.
 
 Rules for this phase:
@@ -199,12 +224,12 @@ Later: if several staff need the same data at once, run this same app on one off
 - **Rule for new code:** anything that starts a scrape (a button, a timer, a new site) must go through this same lock. Never call `Engine.main()` from a second place without it. In practice, call `start_scrape()`: `auto_loop()` is its only caller (play just turns the loop on).
 
 #### Automatic scraping
-**Done, now as continuous play/pause (2026-11-04).** The separate "Mblidh njoftimet" (one run) and "Nis automatikun" buttons were merged into **one button: ▶ Nis mbledhjen / ⏸ Pauzë**. Play runs [turns](#turn-based-scraping-both-sites) one after another, forever, until paused. Each turn writes its new listings to the DB, and the page reloads them after every turn. The dropdown next to it is now the **break between turns** (`Pushim 1 minutë` … `Pushim 1 orë`, default 5 min). The blue label shows "Raundi tjetër pas 4:32 · 120 të reja" (the countdown plus the new listings since play was pressed). Its tooltip shows the turn count.
+**Done, now as continuous play/pause (2026-11-04).** The separate "Mblidh njoftimet" (one run) and "Nis automatikun" buttons were merged into **one button: ▶ Nis mbledhjen / ⏸ Pauzë**. Play runs [turns](#turn-based-scraping-all-sites) one after another, forever, until paused. Each turn writes its new listings to the DB, and the page reloads them after every turn. The dropdown next to it is now the **break between turns** (`Pushim 1 minutë` … `Pushim 1 orë`, default 5 min). The blue label shows "Raundi tjetër pas 4:32 · 120 të reja" (the countdown plus the new listings since play was pressed). Its tooltip shows the turn count.
 - **Pause works mid-turn.** `POST /api/auto/stop` sets `PAUSE_EVENT`. `Engine.main(should_stop=PAUSE_EVENT.is_set)` passes it to each scraper as `should_stop`, which is checked between listings and pages. The turn ends early (tested: 1.6 s), **what it found so far is saved**, and the remaining sites are skipped for that turn (`result.paused = True`). While it winds down, the status shows "Duke ndaluar… ruhen të gjeturat".
 - Pressing play while a paused turn is still winding down clears `PAUSE_EVENT`, so that turn just carries on. If it had already ended early, the next turn starts straight away instead of waiting for the break.
 - `AUTO["turns"]` and `AUTO["new_listings"]` count the session since play (reset on each play after a pause) and are sent in `/api/scrape/status` under `auto`.
 - The one-turn endpoint `POST /api/scrape/start` was **removed** (the UI no longer used it). For a single turn from a console, run `python3 -m Scraper.Engine`.
-- **No duplicates:** each turn skips known UPIDs (`get_known_upids`), and `UNIQUE(site, upid)` plus the upsert make a repeat save impossible anyway. Tested: 0 duplicate `(site, upid)` and 0 duplicate URLs after several turns. The same property posted on both sites, or re-posted under a new ID, is still stored twice; detecting that needs fuzzy matching (phone + size + price), which isn't built.
+- **No duplicates:** each turn skips known UPIDs (`get_known_upids`), and `UNIQUE(site, upid)` plus the upsert make a repeat save impossible anyway. Tested: 0 duplicate `(site, upid)` and 0 duplicate URLs after several turns. The same property posted on more than one site, or re-posted under a new ID, is still stored twice; detecting that needs fuzzy matching (phone + size + price), which isn't built.
 
 How it works (`Scraper/Server.py`):
 - **The presets live in `AUTO_INTERVALS`.** The server rejects any other value with a 400. If you change the presets, change the `<option>`s in `UI/index.html` too.
@@ -229,14 +254,15 @@ The top bar has a preference dropdown: **Të gjitha listimet** (everything, the 
 - Like auto mode, it lives in server memory, so restarting the server resets it to "everything".
 
 ### Phase 3 — More sites and polish
-1. ~~Start the GazetaCelesi scraper~~ **Done (v1)**; see [Gazeta Celesi scraper](#gazetacelesial-scraper-working-v1). The engine runs both sites one after another, in turns.
-2. ~~Automatic scraping mode~~ **Done**; see [Automatic scraping](#automatic-scraping). Follow-ups are listed in [For Alex's Claude](#for-alexs-claude).
-3. Add a `price_history` table so price changes are kept instead of overwritten.
-4. Move per-site settings such as the demo limit and wait times into `config.py` where it makes sense.
-5. Replace the fixed `wait_for_timeout(5000)` with element-based waits.
-6. Use `Request1.py` (HTTPX) where JS rendering isn't needed. It is faster than Playwright. **On hold:** a bare HTTP client is easier for sites to spot, so we stay with Playwright for now.
-7. Add proper logging to the engine.
-8. Later: agent tables and features, and a `status` column on listings (called, interested, sold…).
+1. ~~Start the GazetaCelesi scraper~~ **Done (v1)**; see [Gazeta Celesi scraper](#gazetacelesial-scraper-working-v1). The engine runs every site one after another, in turns.
+2. ~~Add Duashpi.al~~ **Done (v1, 2026-11-04)**; see [Duashpi scraper](#duashpial-scraper-working-v1).
+3. ~~Automatic scraping mode~~ **Done**; see [Automatic scraping](#automatic-scraping). Follow-ups are listed in [For Alex's Claude](#for-alexs-claude).
+4. Add a `price_history` table so price changes are kept instead of overwritten.
+5. Move per-site settings such as the demo limit and wait times into `config.py` where it makes sense.
+6. Replace the fixed `wait_for_timeout(5000)` with element-based waits.
+7. Use `Request1.py` (HTTPX) where JS rendering isn't needed. It is faster than Playwright. **On hold:** a bare HTTP client is easier for sites to spot, so we stay with Playwright for now.
+8. Add proper logging to the engine.
+9. Later: agent tables and features, and a `status` column on listings (called, interested, sold…).
 
 ### Phase 4 — Ship it as a self-updating desktop app
 The architecture and the reasons for it are in **"Product architecture" in `CLAUDE.md`** (agreed 2026-11-04). In short: PyInstaller onedir builds for Windows (an Inno Setup per-user install) and macOS (a signed, notarized `.app` in a `.dmg`), the UI in the normal browser with a tray icon, per-agent SQLite in the user data folder, and a signed `latest.json` on a public releases repo for auto-updates. Work in this order:
@@ -261,7 +287,7 @@ The architecture and the reasons for it are in **"Product architecture" in `CLAU
 ## For Alex's Claude
 
 ### Automatic scraping: built (this was Alex's task, now done)
-It was built first as an on/off timer, then reworked on 2026-11-04 into **continuous play/pause with turns**. See [Automatic scraping](#automatic-scraping) and [Turn-based scraping](#turn-based-scraping-both-sites). Known-UPID skipping and running both sites inside one lock are done too. **If Alex built his own version** of auto mode, keep the play/pause version and port anything his version does better into it (see "After pulling Alex's commits" below).
+It was built first as an on/off timer, then reworked on 2026-11-04 into **continuous play/pause with turns**. See [Automatic scraping](#automatic-scraping) and [Turn-based scraping](#turn-based-scraping-all-sites). Known-UPID skipping and running every site inside one lock are done too. **If Alex built his own version** of auto mode, keep the play/pause version and port anything his version does better into it (see "After pulling Alex's commits" below).
 
 The remaining follow-ups are in [To do next](#to-do-next-prioritized-2026-11-04). Good ones to pick up:
 - Item 2, persisting the state to `settings.json`.
@@ -280,7 +306,7 @@ There's no `requirements.txt` yet (to-do item 11), so this list is the source of
 
 ### Start it
     py -3.14 -m Scraper.Server                    # the app: open http://127.0.0.1:8000, Ctrl+C to stop
-    py -3.14 -m Scraper.Engine                    # one turn of both sites in the terminal, no UI
+    py -3.14 -m Scraper.Engine                    # one turn of every site in the terminal, no UI
     py -3.14 -m GazetaCelesi.PlaywrightScraper    # one Gazeta turn only, prints the listings, doesn't touch the DB
     py -3.14 -m MerrJep_al.PlaywrightScraper1     # one MerrJep turn only, doesn't touch the DB
     py -3.14 -m Tools.FetchHTML <url>             # save a page's HTML to Tools/HTML/ to study a site's markup
@@ -307,7 +333,7 @@ At the moment we test and scrape each site one at a time to check errors and exp
 
 Known gotchas:
 - If `listings.xlsx` is open in Excel, saving fails. Close it and rerun. Phase 1, step 7 removes this problem for the scraped data.
-- Both scrapers keep their state in module-level globals. `reset_state()` clears the per-turn part (`PROCESSED_UPIDS`, `SCRAPED_LISTINGS`) at the start of every turn. `RESUME_PAGE`, `AGENCY_UPIDS` and `FAILED_UPIDS` carry over on purpose (see [Turn-based scraping](#turn-based-scraping-both-sites)).
+- Every scraper keeps its state in module-level globals. `reset_state()` clears the per-turn part (`PROCESSED_UPIDS`, `SCRAPED_LISTINGS`) at the start of every turn. `RESUME_PAGE`, `AGENCY_UPIDS` and `FAILED_UPIDS` carry over on purpose (see [Turn-based scraping](#turn-based-scraping-all-sites)).
 - MerrJep listings without JSON-LD `Product` data fail, are logged, and go into `FAILED_UPIDS`, so they aren't reopened until a restart.
 - The server sends `Cache-Control: no-cache` on every response (`no_stale_ui` middleware in `Server.py`). Without it, browsers kept an old `style.css`/`app.js` after an update, so new UI elements looked unstyled.
 - `create_tables()` won't add new columns to an existing database (see the Database section).

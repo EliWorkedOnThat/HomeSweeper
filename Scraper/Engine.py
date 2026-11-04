@@ -2,6 +2,7 @@
 from rich import print
 from MerrJep_al.PlaywrightScraper1 import create_browser_instance as scrape_merrjep
 from GazetaCelesi.PlaywrightScraper import scrape_gazetacelesi
+from Duashpi_al.PlaywrightScraper2 import scrape_duashpi_al
 from Scraper.Output import save_listings as export_to_excel
 from Scraper.DB import connect_to_db, create_tables, save_listing, get_known_upids
 
@@ -10,6 +11,7 @@ from Scraper.DB import connect_to_db, create_tables, save_listing, get_known_upi
 SCRAPERS = [
     ("merrjep", scrape_merrjep),
     ("gazetacelesi", scrape_gazetacelesi),
+    ("duashpi", scrape_duashpi_al),
 ]
 
 #Runs one turn: each site scrapes up to Listings_Per_Turn NEW listings (config.py), which are saved before the next site starts

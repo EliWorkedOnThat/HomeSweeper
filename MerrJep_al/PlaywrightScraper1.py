@@ -11,7 +11,7 @@ DEMO_LISTING_LIMIT = 5 #How many listings to scrape per turn when Demo_Environme
 PROCESSED_UPIDS = set() #Everything this turn skips: already in the DB, scraped this turn, or remembered below
 SCRAPED_LISTINGS = []
 
-#Kept between turns while the program runs (reset_state() leaves them alone), a restart just starts from page 1 again
+#Kept between turns while the program runs (res et_state() leaves them alone), a restart just starts from page 1 again
 RESUME_PAGE = 1 #Deepest page reached so far, once a turn catches up with the new posts it jumps here for the older ones
 AGENCY_UPIDS = set() #Agency listings we skipped, so "Jo Listime Agjensie" doesn't treat them as new every turn
 FAILED_UPIDS = set() #Listings that failed (e.g. no JSON-LD), not reopened until the program restarts
