@@ -1,6 +1,10 @@
 ## This file will act as notes , samples , tests file for urls and other tools we may need.
 
+INFO FOR GAZETA CELESI WEBSITE 
 
-<button class="new-btn btn-default btn-block btn-lg"><span class="main-contact"><bdi>+355696320000</bdi></span> <span class="secondary-contacts">Kontakti: Viber, Whatsapp &amp; Skype</span> <i class="ci-pazar-small ci-caret-down ci-color-muted"></i></button>
+base url to get to estate related page is = https://www.gazetacelesi.al/shtepi
 
-<button class="new-btn btn-default btn-block btn-lg"><span class="main-contact"><bdi>+355698329326</bdi></span> <span class="secondary-contacts">Kontakti: Viber, Whatsapp &amp; Skype</span> <i class="ci-pazar-small ci-caret-down ci-color-muted"></i></button>
+pagination is handled in the url using a simple page 1 , page 2 etc as you can see here  https://www.gazetacelesi.al/shtepi/njoftime?page=1
+
+
+This tag is likely to be the tag to use to find listings = listings = page.locator('a[class*="ad-list-card_containerH"]')

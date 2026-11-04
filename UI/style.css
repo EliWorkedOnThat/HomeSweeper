@@ -94,7 +94,10 @@ body.no-scroll { overflow: hidden; } /* Page stays put while a preview is open *
 
 /* ---------- Automatic scraping controls ---------- */
 .auto-group { display: flex; gap: 6px; min-width: 0; }
-.auto-group select {
+.btn-on { border-color: var(--accent); color: var(--accent); background: var(--chip-bg); }
+
+/* Top bar dropdowns (auto interval + the "Jo Listime Agjensie" preference), same look as the filter dropdowns */
+.auto-group select, .top-select {
     min-width: 0;
     padding: 8px 10px;
     border: 1px solid var(--border);
@@ -103,7 +106,8 @@ body.no-scroll { overflow: hidden; } /* Page stays put while a preview is open *
     color: var(--text);
     font: inherit;
 }
-.btn-on { border-color: var(--accent); color: var(--accent); background: var(--chip-bg); }
+.top-select:disabled { opacity: 0.55; }
+.top-select.pref-on { border-color: var(--accent); color: var(--accent); background: var(--chip-bg); } /* Filter on: same blue as .btn-on */
 
 main { padding: 20px 24px 40px; max-width: 1600px; margin: 0 auto; }
 

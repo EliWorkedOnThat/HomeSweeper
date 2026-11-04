@@ -443,15 +443,6 @@ function openDetails(l) {
 
 // ---------- Scraping ----------
 
-async function startScrape() {
-    $("scrape-btn").disabled = true;
-    const response = await fetch("/api/scrape/start", { method: "POST" });
-    if (!response.ok && response.status !== 409) {
-        alert("Mbledhja e njoftimeve nuk mund të fillonte. Provo përsëri.");
-    }
-    checkStatus();
-}
-
 // Polls while a scrape runs or auto mode is on, and reloads the listings whenever a scrape finishes
 async function checkStatus() {
     clearTimeout(pollTimer);
@@ -466,9 +457,10 @@ async function checkStatus() {
 
     showStatus(status);
     showAuto(status.auto);
+    showPreferences(status.preferences);
 
     if (lastFinished !== undefined && status.finished_at !== lastFinished) {
-        loadListings(); // A scrape (manual or automatic) just finished, pick up what it saved
+        loadListings(); // A turn just finished (or was paused), pick up what it saved
     }
     lastFinished = status.finished_at;
 
@@ -480,16 +472,18 @@ async function checkStatus() {
 function showStatus(status) {
     scrapeState = status.state;
     const pill = $("status");
+    const saved = status.result ? formatNumber(status.result.saved) : null;
     const labels = {
         idle: "Në pritje",
-        running: status.source === "auto" ? "Duke mbledhur (automatik)…" : "Duke mbledhur…",
-        done: status.result ? `Përfundoi — ${status.result.saved} u ruajtën` : "Përfundoi",
+        running: status.pausing ? "Duke ndaluar… ruhen të gjeturat" : `Duke mbledhur · raundi ${(status.auto?.turns || 0) + 1}`,
+        done: !status.result ? "Përfundoi"
+            : status.result.paused ? `Në pauzë — ${saved} të reja u ruajtën`
+            : `Raundi përfundoi — ${saved} të reja`,
         error: "Gabim",
     };
     pill.textContent = labels[status.state] || status.state;
     pill.className = `status status-${status.state}`;
     pill.title = status.state === "error" ? "Mbledhja dështoi. Shiko konsolën e serverit për detaje." : "";
-    $("scrape-btn").disabled = status.state === "running";
     $("stat-last").textContent = localTime(status.finished_at)?.split(", ")[1] || "–";
 }
 
@@ -500,12 +494,16 @@ function showOffline() {
     pill.title = "Sigurohu që serveri është i ndezur.";
 }
 
-// ---------- Automatic scraping ----------
+// ---------- Continuous scraping (play / pause) ----------
 
+// One button: ▶ starts turn after turn, ⏸ pauses (a running turn stops early and still saves what it found)
 function showAuto(auto) {
     autoState = auto;
-    const btn = $("auto-btn");
-    btn.textContent = auto.enabled ? "■ Ndalo automatikun" : "▶ Nis automatikun";
+    const btn = $("scrape-btn");
+    btn.textContent = auto.enabled ? "⏸ Pauzë" : "▶ Nis mbledhjen";
+    btn.title = auto.enabled
+        ? "Ndalo mbledhjen. Njoftimet e gjetura deri tani ruhen."
+        : "Mbledhja vazhdon raund pas raundi derisa ta ndalosh";
     btn.classList.toggle("btn-on", auto.enabled);
     if (auto.enabled && auto.interval_minutes) {
         $("auto-interval").value = String(auto.interval_minutes); // Show what the server is actually using
@@ -513,7 +511,7 @@ function showAuto(auto) {
     updateCountdown();
 }
 
-// "Automatik · tjetra pas 4:32" — ticks every second from the next_run_at the server gave us
+// "Raundi tjetër pas 4:32 · 120 të reja" — ticks every second from the next_run_at the server gave us
 function updateCountdown() {
     const pill = $("auto-status");
     if (!autoState || !autoState.enabled) {
@@ -522,15 +520,16 @@ function updateCountdown() {
     }
     pill.hidden = false;
 
+    const total = `${formatNumber(autoState.new_listings || 0)} të reja`;
     if (scrapeState === "running") {
-        pill.textContent = "Automatik · duke mbledhur…";
+        pill.textContent = `Në punë · ${total}`;
     } else if (autoState.next_run_at) {
         const seconds = Math.max(0, Math.round((parseUtc(autoState.next_run_at) - Date.now()) / 1000));
-        pill.textContent = seconds > 0 ? `Automatik · tjetra pas ${formatDuration(seconds)}` : "Automatik · po fillon…";
+        pill.textContent = seconds > 0 ? `Raundi tjetër pas ${formatDuration(seconds)} · ${total}` : `Po fillon raundi… · ${total}`;
     } else {
-        pill.textContent = "Automatik · në pritje…";
+        pill.textContent = `Në pritje… · ${total}`;
     }
-    pill.title = `Njoftimet mblidhen automatikisht ${$("auto-interval").selectedOptions[0].textContent.toLowerCase()}.`;
+    pill.title = `Që kur u nis: ${formatNumber(autoState.turns || 0)} raunde, ${total}. ${$("auto-interval").selectedOptions[0].textContent} mes raundeve.`;
 }
 
 // 272 -> "4:32", 3725 -> "1:02:05"
@@ -550,13 +549,13 @@ async function startAuto() {
 }
 
 async function toggleAuto() {
-    const btn = $("auto-btn");
+    const btn = $("scrape-btn");
     btn.disabled = true;
     try {
         const response = autoState && autoState.enabled
             ? await fetch("/api/auto/stop", { method: "POST" })
             : await startAuto();
-        if (!response.ok) alert("Mbledhja automatike nuk mund të ndryshohej. Provo përsëri.");
+        if (!response.ok) alert("Mbledhja nuk mund të nisej ose të ndalej. Provo përsëri.");
     } catch {
         alert("Serveri nuk përgjigjet. Sigurohu që është i ndezur.");
     } finally {
@@ -571,6 +570,40 @@ async function changeAutoInterval() {
     try {
         await startAuto();
     } finally {
+        checkStatus();
+    }
+}
+
+// ---------- Scrape preferences ----------
+
+// Show what the server is actually using (it keeps the preference in memory, so a restart resets it)
+function showPreferences(preferences) {
+    if (!preferences) return;
+    $("pref-agency").value = preferences.skip_agencies ? "no-agency" : "all";
+    markPreference();
+}
+
+// Highlight the preference pill while agency listings are being skipped
+function markPreference() {
+    $("pref-agency").classList.toggle("pref-on", $("pref-agency").value === "no-agency");
+}
+
+async function changePreferences() {
+    const select = $("pref-agency");
+    markPreference(); // Show the new look straight away, checkStatus() corrects it if the save failed
+    select.disabled = true;
+    try {
+        const response = await fetch("/api/preferences", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ skip_agencies: select.value === "no-agency" }),
+        });
+        if (!response.ok) alert("Preferenca nuk mund të ruhej. Provo përsëri.");
+        else if (scrapeState === "running") alert("Preferenca do të zbatohet në mbledhjen e radhës.");
+    } catch {
+        alert("Serveri nuk përgjigjet. Sigurohu që është i ndezur.");
+    } finally {
+        select.disabled = false;
         checkStatus();
     }
 }
@@ -616,9 +649,9 @@ $("f-clear").addEventListener("click", () => {
 // Re-check which boxes are cut off when the window size changes
 window.addEventListener("resize", debounce(() => markOverflow($("cards")), 150));
 
-$("scrape-btn").addEventListener("click", startScrape);
-$("auto-btn").addEventListener("click", toggleAuto);
+$("scrape-btn").addEventListener("click", toggleAuto);
 $("auto-interval").addEventListener("change", changeAutoInterval);
+$("pref-agency").addEventListener("change", changePreferences);
 setInterval(updateCountdown, 1000);
 
 SELECT_FILTERS.forEach(([id, , label]) => $(id).replaceChildren(new Option(label, "")));

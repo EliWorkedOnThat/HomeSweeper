@@ -108,6 +108,15 @@ def save_listing(connection, listing, site):
         print(f"[red]Error saving listing {row['upid']}: {e}[/red]")
         return False
 
+#Function to get the UPIDs of one site's listings already in the database, so the scrapers can skip them before opening them
+def get_known_upids(connection, site):
+    try:
+        rows = connection.execute("SELECT upid FROM listings WHERE site = ?", (site,))
+        return {str(upid) for (upid,) in rows}
+    except sqlite.Error as e:
+        print(f"[red]Error reading known listings for {site}: {e}[/red]")
+        return set()
+
 #Function to get the stored listings (newest first) for the UI and the Excel export, optionally only one site
 def get_listings(connection, site=None):
     query = "SELECT * FROM listings"

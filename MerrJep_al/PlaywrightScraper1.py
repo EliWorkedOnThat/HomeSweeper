@@ -3,15 +3,20 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from rich import print
 import json
 import re
-from Scraper.config import Demo_Environment, Rest_Time, Headless
+from Scraper.config import Demo_Environment, Rest_Time, Headless, Listings_Per_Turn
 
 #Global Variables
 BASE_URL = "https://www.merrjep.al/njoftime/imobiliare-vendbanime/ne-shitje-kerkoj-te-blej-me-qera-kerkohet-me-qera-nderrohet"
-PAGE_COUNT = 1
-DEMO_LISTING_LIMIT = 5 #How many listings to scrape when Demo_Environment is True
-URL_QUEUE = []
-PROCESSED_UPIDS = set()
+DEMO_LISTING_LIMIT = 5 #How many listings to scrape per turn when Demo_Environment is True
+PROCESSED_UPIDS = set() #Everything this turn skips: already in the DB, scraped this turn, or remembered below
 SCRAPED_LISTINGS = []
+
+#Kept between turns while the program runs (reset_state() leaves them alone), a restart just starts from page 1 again
+RESUME_PAGE = 1 #Deepest page reached so far, once a turn catches up with the new posts it jumps here for the older ones
+AGENCY_UPIDS = set() #Agency listings we skipped, so "Jo Listime Agjensie" doesn't treat them as new every turn
+FAILED_UPIDS = set() #Listings that failed (e.g. no JSON-LD), not reopened until the program restarts
+STOP_CHECK = None #The engine's should_stop function for the current turn (None = never stop early)
+AGENCY_SELECTOR = "span.isstore" #MerrJep marks agency listings on the results card with <span class="label label-default isstore">Agjent për shitje të pronës</span>
 
 #MerrJep's attribute labels mapped to our standard database columns (every site maps its own labels to these)
 ATTRIBUTE_COLUMNS = {
@@ -24,29 +29,35 @@ ATTRIBUTE_COLUMNS = {
     "Njoftim nga": "posted_by",
 }
 
-#Function to create a browser instance
-def create_browser_instance():
-    reset_state() #Start fresh every run, otherwise a second run (e.g. from the UI) continues where the last one stopped
+#Function to create a browser instance and run one turn: scrape up to turn_limit() NEW listings, then hand them back so the engine can save them
+#known_upids are the listings already in the database, they are skipped before clicking into them
+#skip_agencies=True ignores listings posted by agencies (the "Jo Listime Agjensie" preference in the UI)
+#should_stop is checked between listings, when it returns True (the UI's pause button) the turn ends early with what it has so far
+def create_browser_instance(skip_agencies=False, known_upids=(), should_stop=None):
+    global STOP_CHECK
+    STOP_CHECK = should_stop
+    reset_state(known_upids, skip_agencies) #Start fresh every turn, only RESUME_PAGE and the remembered UPIDs carry over
+    page_number = 1 #Always start at the newest posts
     with sync_playwright() as p:
         browser, page = launch_browser(p)
         try:
-            #Demo stops after DEMO_LISTING_LIMIT listings, production keeps going until we run out of pages
-            while not demo_limit_reached():
-                url = get_next_page_url(BASE_URL)
+            while not turn_over():
+                url = page_url(page_number)
                 print(f"[cyan]Navigating to: {url}[/cyan]")
                 page.goto(url, wait_until="domcontentloaded", timeout=30000) #Always wait for something to load to avoid timing errors
                 page.wait_for_timeout(5000)
                 print(f"[cyan]{page.title()}[/cyan]")
                 try:
-                    process_listing_containers(page)
+                    all_seen = process_listing_containers(page, skip_agencies)
                 except PlaywrightTimeoutError:
                     print(f"[yellow]No listings found on {url}, assuming last page reached.[/yellow]")
+                    clamp_resume_page(page_number - 1) #Old listings expire, so keep RESUME_PAGE inside the real page count
                     break
-                remove_processed_url()
-                print(f"[green]Page processed. Queue: {URL_QUEUE}[/green]")
+                print(f"[green]Page {page_number} processed. New this turn: {len(SCRAPED_LISTINGS)}/{turn_limit()}[/green]")
+                page_number = next_page(page_number, all_seen)
         finally:
             browser.close()
-            print(f"[green]Total unique properties scraped: {len(SCRAPED_LISTINGS)}[/green]")
+            print(f"[green]Turn done: {len(SCRAPED_LISTINGS)} new listings, next turn continues older listings from page {RESUME_PAGE}[/green]")
 
     #Hand a copy of the scraped listings back to whoever called this function (Engine.py)
     return list(SCRAPED_LISTINGS)
@@ -68,36 +79,49 @@ def launch_browser(p):
     context = browser.new_context(user_agent=user_agent)
     return browser, context.new_page()
 
-#Helper function to clear the run state left over from a previous run
-def reset_state():
-    global PAGE_COUNT
-    PAGE_COUNT = 1
-    URL_QUEUE.clear()
+#Helper function to clear the last turn's state and load what this turn should skip
+def reset_state(known_upids=(), skip_agencies=False):
     PROCESSED_UPIDS.clear()
     SCRAPED_LISTINGS.clear()
+    PROCESSED_UPIDS.update(str(upid) for upid in known_upids)
+    PROCESSED_UPIDS.update(FAILED_UPIDS)
+    if skip_agencies: #With the preference off, agency listings must be scraped, so they only count as seen while it's on
+        PROCESSED_UPIDS.update(AGENCY_UPIDS)
 
-#Helper function to check if we hit the scrape limit while in demo mode
-def demo_limit_reached():
-    return Demo_Environment and len(SCRAPED_LISTINGS) >= DEMO_LISTING_LIMIT
+#Helper function for how many new listings one turn collects
+def turn_limit():
+    return DEMO_LISTING_LIMIT if Demo_Environment else Listings_Per_Turn
 
-#Helper function to craft url for next pages to fix pagination issues
-def get_next_page_url(BASE_URL):
-    global PAGE_COUNT
+#Helper function to check if this turn has collected enough new listings
+def turn_full():
+    return len(SCRAPED_LISTINGS) >= turn_limit()
 
-    if not URL_QUEUE:
-        if PAGE_COUNT == 1:
-            url = BASE_URL
-        else:
-            url = f"{BASE_URL}?Page={PAGE_COUNT}"
-        URL_QUEUE.append(url)
-        PAGE_COUNT += 1
+#Helper function to check if the user paused scraping (the engine passes the check in as should_stop)
+def stop_requested():
+    return bool(STOP_CHECK and STOP_CHECK())
 
-    return URL_QUEUE[0]
+#Helper function to check if this turn should end: enough new listings, or paused
+def turn_over():
+    return turn_full() or stop_requested()
 
-#Helper function to remove a processed URL from memory
-def remove_processed_url():
-    if URL_QUEUE:
-        return URL_QUEUE.pop(0)
+#Helper function to build the url of a results page (page 1 is the plain BASE_URL)
+def page_url(number):
+    return BASE_URL if number == 1 else f"{BASE_URL}?Page={number}"
+
+#Helper function to pick the next page: normally the next one, but once a page had nothing new we have caught up with the
+#fresh posts, so we jump straight to where the last turn stopped instead of walking through pages we already have
+def next_page(current, all_seen):
+    global RESUME_PAGE
+    RESUME_PAGE = max(RESUME_PAGE, current)
+    if all_seen and RESUME_PAGE > current:
+        print(f"[cyan]Caught up with the new posts, jumping to page {RESUME_PAGE} for older listings.[/cyan]")
+        return RESUME_PAGE
+    return current + 1
+
+#Helper function to keep RESUME_PAGE inside the site's page count (old listings expire, so the site gets fewer pages)
+def clamp_resume_page(last_page):
+    global RESUME_PAGE
+    RESUME_PAGE = max(1, min(RESUME_PAGE, last_page))
 
 #Helper function to go back to previous page if needed
 def go_back(page):
@@ -112,8 +136,8 @@ def find_listing_containers(page):
     print(f"[cyan]Found {count} listings on the page.[/cyan]")
     return listings
 
-#Function to process each listing container
-def process_listing_containers(page):
+#Function to process each NEW listing container, returns True if the page had nothing new at all
+def process_listing_containers(page, skip_agencies=False):
     listings = find_listing_containers(page)
     listing_ids = list(dict.fromkeys(
         listings.nth(i).get_attribute("data-product-id")
@@ -121,21 +145,33 @@ def process_listing_containers(page):
     ))
     results_url = page.url
 
-    for i, upid in enumerate(listing_ids):
-        if demo_limit_reached():
-            print(f"[yellow]Demo limit of {DEMO_LISTING_LIMIT} listings reached.[/yellow]")
+    #Listings already in the database (or skipped before) are dropped here, before any click
+    new_ids = [upid for upid in listing_ids if upid and upid not in PROCESSED_UPIDS]
+    print(f"[cyan]{len(new_ids)} new, {len(listing_ids) - len(new_ids)} already seen.[/cyan]")
+    if not new_ids:
+        return True
+
+    for i, upid in enumerate(new_ids):
+        if turn_full():
+            print(f"[yellow]Turn limit of {turn_limit()} new listings reached.[/yellow]")
+            break
+        if stop_requested():
+            print("[yellow]Paused, ending this turn early with what we have.[/yellow]")
             break
 
-        if not upid or upid in PROCESSED_UPIDS:
-            print(f"[cyan]Skipping duplicate: {upid}[/cyan]")
-            continue
-
-        print(f"[cyan]Processing {i + 1}/{len(listing_ids)}: {upid}[/cyan]")
+        print(f"[cyan]Processing {i + 1}/{len(new_ids)}: {upid}[/cyan]")
 
         try:
             listing = page.locator(
                 f'div.row.row-listing[data-product-id="{upid}"]'
             )
+
+            #Agency check happens on the results card, before clicking, so a skipped listing costs no page load or rest
+            if skip_agencies and listing.locator(AGENCY_SELECTOR).count():
+                print(f"[yellow]Skipping agency listing: {upid}[/yellow]")
+                PROCESSED_UPIDS.add(upid)
+                AGENCY_UPIDS.add(upid)
+                continue
 
             listing.locator("h2 a.Link_vis").first.click()
             page.wait_for_url("**/njoftim/**", timeout=15000)
@@ -154,6 +190,8 @@ def process_listing_containers(page):
 
         except Exception as error:
             print(f"[red]Failed to scrape {upid}: {error}[/red]")
+            PROCESSED_UPIDS.add(upid)
+            FAILED_UPIDS.add(upid) #Don't reopen it every turn, a broken listing would otherwise stop pages from ever counting as "seen"
 
         finally:
             if page.url != results_url:
@@ -162,6 +200,8 @@ def process_listing_containers(page):
         #Rest before opening the next listing to avoid getting flagged
         print(f"[cyan]Resting {Rest_Time}s before next listing...[/cyan]")
         page.wait_for_timeout(Rest_Time * 1000)
+
+    return False
 
 #Function to open a listing container and extract data
 def pull_data_from_listing(page, expected_upid):

@@ -16,19 +16,23 @@
         <div class="actions">
             <span id="status" class="status status-idle">Në pritje</span>
             <span id="auto-status" class="status status-auto" hidden></span>
-            <!-- Automatic scraping: how often (minutes) + on/off. The options must match AUTO_INTERVALS in Scraper/Server.py -->
+            <!-- Continuous scraping: the break between turns (minutes) + play/pause. The options must match AUTO_INTERVALS in Scraper/Server.py -->
             <div class="auto-group">
-                <select id="auto-interval" title="Sa shpesh të mblidhen njoftimet automatikisht">
-                    <option value="1">Çdo 1 minutë</option>
-                    <option value="5">Çdo 5 minuta</option>
-                    <option value="10">Çdo 10 minuta</option>
-                    <option value="15" selected>Çdo 15 minuta</option>
-                    <option value="30">Çdo 30 minuta</option>
-                    <option value="60">Çdo 1 orë</option>
+                <select id="auto-interval" title="Sa pushim bën mbledhja mes raundeve" aria-label="Pushimi mes raundeve">
+                    <option value="1">Pushim 1 minutë</option>
+                    <option value="5" selected>Pushim 5 minuta</option>
+                    <option value="10">Pushim 10 minuta</option>
+                    <option value="15">Pushim 15 minuta</option>
+                    <option value="30">Pushim 30 minuta</option>
+                    <option value="60">Pushim 1 orë</option>
                 </select>
-                <button id="auto-btn" class="btn">▶ Nis automatikun</button>
+                <button id="scrape-btn" class="btn btn-primary" title="Mbledhja vazhdon raund pas raundi derisa ta ndalosh">▶ Nis mbledhjen</button>
             </div>
-            <button id="scrape-btn" class="btn btn-primary">Mblidh njoftimet</button>
+            <!-- Scrape preference, sent to POST /api/preferences and applied from the next turn -->
+            <select id="pref-agency" class="top-select" title="Preferenca e mbledhjes, zbatohet në mbledhjen e radhës" aria-label="Preferenca e mbledhjes">
+                <option value="all">Të gjitha listimet</option>
+                <option value="no-agency">Jo Listime Agjensie</option>
+            </select>
             <a id="export-btn" class="btn" href="/api/export">Eksporto në Excel</a>
         </div>
     </header>
@@ -62,7 +66,7 @@
         </section>
 
         <section id="cards" class="cards"></section>
-        <p id="empty" class="empty" hidden>Ende nuk ka njoftime — shtyp <strong>Mblidh njoftimet</strong> për të marrë të parat.</p>
+        <p id="empty" class="empty" hidden>Ende nuk ka njoftime — shtyp <strong>▶ Nis mbledhjen</strong> për të marrë të parat.</p>
         <p id="no-match" class="empty" hidden>Asnjë njoftim nuk përputhet me këta filtra.</p>
     </main>
 
