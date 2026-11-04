@@ -12,30 +12,35 @@ The code must run on **Windows, Linux and macOS**. Linux is a dev platform only;
 
 Run from the project root. The imports are package-style (`Scraper.`, `MerrJep_al.`, `Tools.`), so running a file directly breaks them. Use `python3` on Linux/macOS and `py -3.14` on Windows:
 
-    python3 -m Scraper.Engine               # one scrape in the terminal
-    python3 -m Scraper.Server               # web UI at http://127.0.0.1:8000, Ctrl+C to stop
-    python3 -m Tools.FetchHTML <url>        # save a page's HTML to Tools/HTML/ (--fast = plain HTTP, --show = visible browser)
+    python3 -m Scraper.Engine                       # one turn (both sites) in the terminal
+    python3 -m Scraper.Server                       # web UI at http://127.0.0.1:8000, Ctrl+C to stop
+    python3 -m GazetaCelesi.PlaywrightScraper       # one Gazeta Celesi turn on its own, prints the listings (no DB)
+    python3 -m Tools.FetchHTML <url>                # save a page's HTML to Tools/HTML/ (--fast = plain HTTP, --show = visible browser)
 
-Deps: `playwright` (+ `playwright install chromium`), `openpyxl`, `rich`, `httpx`, `requests`, `beautifulsoup4`, `fastapi`, `uvicorn`. There is no requirements file and no test suite yet.
+Deps: `playwright` (+ `playwright install chromium`), `openpyxl`, `rich`, `httpx`, `requests`, `beautifulsoup4`, `fastapi`, `uvicorn`. Python 3.10+ (developed on 3.14). There is no requirements file and no test suite yet. **Setup for a fresh clone or after pulling someone's commits:** see "Running the project" in `NOTES.md`.
 
 ## Layout
-- `Scraper/Engine.py` is the orchestrator. `main()` connects to the DB, creates the tables, runs the MerrJep scraper, calls `save_listing()` for each listing, exports to Excel, and returns `{found, saved, failed}` (or `None` if the DB can't be opened).
-- `Scraper/DB.py` is the **only** file that touches SQLite: `connect_to_db()` (WAL on), `create_tables()`, `save_listing(connection, listing, site)` (an upsert on `(site, upid)`), `get_listings(connection, site=None)` (dicts with `images`/`attributes` decoded from JSON).
+- `Scraper/Engine.py` is the orchestrator. `main(skip_agencies=False, should_stop=None)` runs **one turn**: it connects to the DB, then for each `(site, scrape)` in `SCRAPERS` (MerrJep, then Gazeta Celesi) it loads `get_known_upids(site)`, calls the scraper, saves its listings with `save_listing()` and exports them to Excel, before moving to the next site. A crash in one site is logged and doesn't stop the next. If `should_stop()` turns True (pause), the remaining sites are skipped. It returns `{found, saved, failed, sites: {site: {...}}, paused}`, or `None` if the DB can't be opened. To add a site, write its scraper and add one line to `SCRAPERS`.
+- `Scraper/DB.py` is the **only** file that touches SQLite: `connect_to_db()` (WAL on), `create_tables()`, `save_listing(connection, listing, site)` (an upsert on `(site, upid)`), `get_known_upids(connection, site)` (a set of saved UPIDs, so scrapers skip them), `get_listings(connection, site=None)` (dicts with `images`/`attributes` decoded from JSON).
 - `Scraper/Output.py` has two functions. `save_listings(listings, site)` appends to `Output/listings.xlsx` and is used by the engine. `build_workbook(listings)` returns fresh `.xlsx` bytes from DB rows and is used by the UI's export download.
 - `Scraper/Server.py` is the FastAPI server, kept as a thin layer with no scraping logic. Its endpoints are `GET /api/listings`, `GET /api/scrape/status` (the running/last turn, plus continuous mode: next turn, turn count and new listings this session), `POST /api/auto/start` (play: `{interval_minutes}` from `AUTO_INTERVALS`, the break between turns) and `POST /api/auto/stop` (pause: sets `PAUSE_EVENT`, so a running turn stops early and saves what it has), `POST /api/preferences` (`{skip_agencies}`, the "Jo Listime Agjensie" dropdown, snapshotted when each scrape starts and passed to `Engine.main(skip_agencies=...)`), and `GET /api/export`. It serves `UI/` at `/` and binds to `127.0.0.1:8000` only. Every turn starts through `start_scrape()`, which holds `SCRAPE_LOCK`, and `auto_loop()` (a background thread that wakes on `AUTO_WAKE`) is its only caller. Never start a scrape any other way, and `STATE_LOCK` guards the shared status dicts.
 - `UI/` (`index.html`, `style.css`, `app.js`) is plain HTML/CSS/JS with no build step. It loads every listing once, then filters and sorts in the browser, and polls the status every 3 s during a scrape. Listings are shown as a flexbox grid of cards that display every scraped field. Every flex child has `min-width: 0`, so nothing overflows its box. Text is clamped, and `markOverflow()` makes any cut-off box clickable; it opens the full content in a shared `<dialog>` preview. The same dialog is used for the photo gallery and the "All details" view. It builds DOM nodes with `textContent`, never `innerHTML`, because the data is scraped.
 - `Tools/` holds dev utilities. `FetchHTML.py` saves a URL's HTML to `Tools/HTML/` (git-ignored) so a site's markup can be studied before writing its scraper. It uses Playwright by default and HTTPX with `--fast`.
-- `Scraper/config.py` holds the global settings: `Demo_Environment` (True means 5 listings per run), `Headless` (True means no browser window), `Rest_Time` (s between listings), `Database_Name`. The auto-scrape interval is **not** in config; staff pick it in the UI.
-- `MerrJep_al/PlaywrightScraper1.py` is the working scraper. `create_browser_instance(skip_agencies=False)` returns a list of listing dicts. With `skip_agencies=True` it skips any results card containing `span.isstore` ("Agjent për shitje të pronës") before clicking into it. `ATTRIBUTE_COLUMNS` maps Albanian tag labels to the standard DB columns, with `parse_number()` and `combine_phones()` as helpers.
-- `MerrJep_al/Request1.py` is an HTTPX `fetch()` that nothing uses yet.
-- `GazetaCelesi/PlaywrightScraper.py` is the second scraper. `scrape_gazetacelesi(skip_agencies=False)` reads each results page's embedded Next.js JSON (`script#__NEXT_DATA__`) and never opens individual listings; details are in `NOTES.md`. `Request.py` there is still empty.
-- `Engine.SCRAPERS` lists `(site key, scrape function)` pairs. To add a site, write its scraper and add one line there.
+- `Scraper/config.py` holds the developer settings: `Demo_Environment` (True means 5 new listings per site per turn), `Listings_Per_Turn` (50, used when demo is off), `Headless` (True means no browser window), `Rest_Time` (s between listings on MerrJep, between pages on Gazeta), `Database_Name`. The break between turns is **not** in config; staff pick it in the UI.
+- `MerrJep_al/PlaywrightScraper1.py` is the MerrJep scraper. `create_browser_instance(skip_agencies=False, known_upids=(), should_stop=None)` runs one turn and returns a list of listing dicts. It opens each new listing (click, read JSON-LD + HTML tags, go back). With `skip_agencies=True` it skips any results card containing `span.isstore` ("Agjent për shitje të pronës") before clicking. `ATTRIBUTE_COLUMNS` maps Albanian tag labels to the standard DB columns, with `parse_number()` and `combine_phones()` as helpers. The Engine imports it as `scrape_merrjep`.
+- `MerrJep_al/Request1.py` is an HTTPX `fetch()` that nothing uses yet. It's parked on purpose (plain HTTP is easier for sites to spot), so leave its unused imports alone.
+- `GazetaCelesi/PlaywrightScraper.py` is the Gazeta Celesi scraper. `scrape_gazetacelesi(skip_agencies=False, known_upids=(), should_stop=None)` has the same turn logic as MerrJep. It reads each results page's embedded Next.js JSON (`script#__NEXT_DATA__`), which holds the full data for all 20 listings, so it **never opens individual listings**. It still scrolls to each new card and pauses (`scan_card()`) so the visit looks human. Details and the field mapping are in `NOTES.md`. `GazetaCelesi/Request.py` is an empty placeholder.
+- **Both scrapers share one structure.** Module globals plus `reset_state()`; `turn_limit()`, `turn_full()`, `stop_requested()` and `turn_over()`; `page_url(n)`; `next_page()` (the jump to `RESUME_PAGE`); `clamp_resume_page()`; and a copy of `launch_browser()`. Keep a new site's scraper in the same shape.
 - `Data/Homesweeper.db` and `Output/` are generated and git-ignored.
 - `Analyze.md` is a scratchpad for HTML samples and URLs.
 
 ## Rules / conventions
 - **All SQL lives in `DB.py`.** Scrapers and the engine call its functions, so a later PostgreSQL switch only touches that file. Every write goes inside `with connection:`.
-- **Scraper contract:** each site exposes a function that returns a list of dicts with the same keys (`upid, url, title, description, price, currency, phone, seller, published_date, published_time, listing_type, size_m2, rooms, condition, city, address, posted_by, images (list), attributes (dict)`). The engine saves them with a site key (`"merrjep"`, later `"gazetacelesi"`). Each site maps its own labels to the shared English filter columns and keeps the raw tags in `attributes`.
+- **Scraper contract:** each site exposes `scrape(skip_agencies=False, known_upids=(), should_stop=None)`, which runs **one turn** and returns a list of dicts with the same keys (`upid, url, title, description, price, currency, phone, seller, published_date, published_time, listing_type, size_m2, rooms, condition, city, address, posted_by, images (list), attributes (dict)`).
+  - **One turn:** at most `turn_limit()` new listings. Start at page 1 (newest), skip `known_upids` before doing any work on them, and return early with what it has when `should_stop()` is True.
+  - **Saving:** the engine saves the results with the site key (`"merrjep"`, `"gazetacelesi"`).
+  - **Field mapping:** each site maps its own labels to the shared English filter columns and keeps the raw tags in `attributes`.
+  - **Wording:** write values in MerrJep's wording (`Shitet`, `Jepet me qera`, `Kompani`, `Tiranë`, `EUR`/`ALL`), so the UI dropdowns show one option per meaning.
 - `CREATE TABLE IF NOT EXISTS` never alters an existing table. In dev, delete `Data/Homesweeper.db` after a schema change. Once real data exists, use `ALTER TABLE`.
 - **All UI text is Albanian.** The product is sold to Albanian staff, so every label, button, placeholder, tooltip, `aria-label`, alert and message in `UI/` and every user-facing filename (e.g. the Excel export) is in Albanian. Code, comments, API field names and console logs stay in English. Numbers use Albanian style (`185.000`, `72,5`) and times are shown in Tirana time (`03.11.2026, 16:01`) via `formatNumber()`/`localTime()` in `app.js`, which are formatted by hand because browsers don't reliably ship `sq-AL` locale data.
 - Keep the existing code style: `#Comment` headers above each function, `rich` coloured prints for logging, `Path(__file__)`-relative paths.
@@ -116,20 +121,33 @@ Not doing it for now. **The owner installs the app on every agent's PC personall
 - Pin every dependency to an exact version in `requirements.txt` so builds are reproducible. Upgrade Playwright deliberately, because it changes the Chromium download.
 - Scraper fixes (sites change their markup) ship through this same flow, so a fix for a broken scraper reaches every agent within hours.
 
-## Current status (2026-11-04)
-Phase 1 (connect the DB) is partly done. `NOTES.md` lags a little here: `Data/` is already in `.gitignore`, and the unused `sqlite3` import is already gone from the scraper.
-- Done in Phase 1: WAL, the `save_listing` upsert, `get_listings`, and the engine saving to the DB before the Excel export.
-- Phase 1 is finished: `get_known_upids(site)` is in, and both scrapers skip known UPIDs before opening them. A run is now **one turn** of up to `Listings_Per_Turn` (50) new listings per site (newest first, then it continues older listings from `RESUME_PAGE`). See "Turn-based scraping" in `NOTES.md`.
-- Phase 2 (the local web UI) has a first version working: the server and `UI/`, started from the console. A double-click launcher is deferred until testing is done, and it must be cross-platform. Possible next steps: show live progress during a scrape (the status currently only says running/done), a listing detail view, and the config toggles in the UI.
-- The **"Jo Listime Agjensie" preference** is done: the top-bar dropdown calls `POST /api/preferences`, and the scraper skips agency cards. It lives in server memory for now and moves to `settings.json` in Phase 4.
-- **Phase 4 (packaging and auto-update)** follows the [Product architecture](#product-architecture-target-for-the-finished-app) section above. None of it is built yet.
-- Scraping is **continuous with play/pause**. One **▶ Nis mbledhjen / ⏸ Pauzë** button runs turns forever, with a break from the dropdown (1/5/10/15/30/60 min) in between. Pause sets `PAUSE_EVENT`, which reaches the scrapers as `should_stop`, so a running turn ends within seconds and still saves what it found. See "Automatic scraping" in `NOTES.md`. Remaining follow-ups are under "For Alex's Claude".
-- Phase 3 (GazetaCelesi, price history) is next after that. Details are in `NOTES.md`.
+## Current status and handoff (2026-11-04)
+Read this first in a new session. The full to-do list is **"To do next" in `NOTES.md`**, and the setup steps are **"Running the project" in `NOTES.md`**.
+
+**What works today** (tested end to end on Windows, 2026-11-04):
+- **Two sites, MerrJep and Gazeta Celesi**, both scraped into one SQLite DB with the same columns and wording.
+- **Turn-based scraping.** A turn is up to `Listings_Per_Turn` (50, or 5 in demo) **new** listings per site, saved after each site.
+  - Every turn starts at page 1, so new posts come first.
+  - Once a page has nothing new, the turn jumps to `RESUME_PAGE` to keep filling in older listings.
+  - Known UPIDs are skipped before any click.
+- **Continuous play/pause in the UI.** One **▶ Nis mbledhjen / ⏸ Pauzë** button runs turns forever, with a break from the dropdown (1/5/10/15/30/60 min) in between. Pause sets `PAUSE_EVENT`, which reaches the scrapers as `should_stop`, so a running turn ends within about 2 s and still saves what it found.
+- **No duplicates.** Each turn skips known UPIDs, and the `UNIQUE(site, upid)` upsert backs that up (tested: 0 duplicate UPIDs or URLs).
+- **"Jo Listime Agjensie"** skips agency cards on both sites (MerrJep `span.isstore`, Gazeta `userType == "business"`).
+- **Phase 1 (DB) is finished.** Phase 2 (local web UI) works from the console. Phase 3 has started: Gazeta is done. Phase 4 (packaging and auto-update, per [Product architecture](#product-architecture-target-for-the-finished-app)) is not started.
+
+**Things that will surprise you:**
+- **State lives in memory:** play/pause, the break, "Jo Listime Agjensie", `RESUME_PAGE`, `AGENCY_UPIDS` and `FAILED_UPIDS` are all in server or module memory. A restart pauses scraping, and the first turn after a restart walks through known pages again before it finds new ones. All of these move to `settings.json` in Phase 4.
+- **Saved listings aren't re-scraped**, so price changes on them aren't picked up, and `last_seen` means "last scraped", not "still online".
+- **`config.py` in the repo is for debugging:** `Demo_Environment = True` and `Headless = False`. The shipped app needs `False`/`True`.
+- **The one-turn endpoint `POST /api/scrape/start` was removed.** Use `python3 -m Scraper.Engine` for a single turn.
+- **Alex** (the second developer) had "automatic scraping" as his task. It is now built as play/pause, so if his commits touch `Server.py`, `UI/app.js` or `UI/index.html`, expect conflicts. See "Running the project → After pulling Alex's commits" in `NOTES.md`.
 
 ## Gotchas
-- The MerrJep scraper keeps its state in module globals. `create_browser_instance()` now calls `reset_state()` first, so repeated runs in one process start fresh, but two runs must never overlap (the server's lock enforces this).
-- Scrape state lives in server memory, so restarting the server resets the status pill. The listings themselves are safe in the DB.
-- Playwright headless mode is controlled by `Headless` in `config.py`. It is currently `False` in the repo, so a window shows for debugging; the shipped app always uses `True`. When it is `True`, `launch_browser()` in the MerrJep scraper uses `channel="chromium"` (Chrome's newer headless mode, which has real plugins and the real GPU) and swaps `HeadlessChrome` for `Chrome` in the user agent, so headless looks like the visible browser to sites. New scrapers should copy this helper. Page loads still use fixed `wait_for_timeout(5000)` waits. Listings with no JSON-LD `Product` are skipped.
+- Both scrapers keep their state in module globals. `reset_state()` clears the per-turn state at the start of each turn. `RESUME_PAGE`, `AGENCY_UPIDS`, `FAILED_UPIDS` and `STOP_CHECK` deliberately survive between turns. Two turns must never overlap (the server's `SCRAPE_LOCK` enforces this).
+- Scrape state lives in server memory, so restarting the server resets the status pill and pauses scraping. The listings themselves are safe in the DB.
+- Playwright headless mode is controlled by `Headless` in `config.py`. It is currently `False` in the repo, so a window shows for debugging; the shipped app always uses `True`. When it is `True`, `launch_browser()` (copied into both scrapers) uses `channel="chromium"` (Chrome's newer headless mode, which has real plugins and the real GPU) and swaps `HeadlessChrome` for `Chrome` in the user agent, so headless looks like the visible browser to sites. New scrapers should copy this helper.
+- MerrJep page loads still use a fixed `wait_for_timeout(5000)`. MerrJep listings with no JSON-LD `Product` fail and go into `FAILED_UPIDS`. Gazeta waits for its `__NEXT_DATA__` script instead.
+- Gazeta's markup is Next.js. CSS class names like `ad-list-card_containerH__cGdas` carry a build hash, so match them with `[class*="ad-list-card_containerH"]`, never the full name. If Gazeta stops returning listings, check the `props.pageProps.getAdsList` path in `__NEXT_DATA__` first (save a page with `Tools.FetchHTML`).
 - The server sends `Cache-Control: no-cache` on every response (the `no_stale_ui` middleware). Without it, browsers keep an old `style.css`/`app.js` after a change and new UI elements look unstyled. Keep it; it matters even more once updates ship.
 - Saving the Excel file fails if `listings.xlsx` is open in Excel (it warns and doesn't crash).
-- `published_date` is raw Albanian text (e.g. `tet 03 2026`) and isn't normalised yet. `first_seen`/`last_seen` are UTC.
+- `published_date` is text in each site's own format (MerrJep `tet 03 2026`, Gazeta `04/11/2026`) and isn't normalised yet, so never sort by it. The UI's "newest" sort uses `first_seen`. `first_seen`/`last_seen` are UTC.

@@ -9,10 +9,10 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 
 ## Project layout
 - `MerrJep_al/` — MerrJep.al scrapers (folder was renamed from `MerrJep.al` so it can be imported as a Python package).
-  - `PlaywrightScraper1.py` — the working scraper. Exposes `create_browser_instance()`, which returns a list of listing dicts.
+  - `PlaywrightScraper1.py` — the working scraper. Exposes `create_browser_instance(skip_agencies=False, known_upids=(), should_stop=None)`, which runs one turn and returns a list of listing dicts.
   - `Request1.py` — HTTPX `fetch()` with browser-like headers. Not used by the engine yet.
 - `GazetaCelesi/` — Gazeta Celesi scrapers.
-  - `PlaywrightScraper.py` — the working scraper. Exposes `scrape_gazetacelesi(skip_agencies=False)`, which returns a list of listing dicts. See [Gazeta Celesi scraper](#gazetacelesial-scraper-working-v1).
+  - `PlaywrightScraper.py` — the working scraper. Exposes `scrape_gazetacelesi(skip_agencies=False, known_upids=(), should_stop=None)`, which runs one turn and returns a list of listing dicts. See [Gazeta Celesi scraper](#gazetacelesial-scraper-working-v1).
   - `Request.py` — empty placeholder.
 - `Scraper/Engine.py` — orchestrator. Runs every site in `SCRAPERS` one after another (MerrJep, then Gazeta Celesi) and saves each site's results with its own site key. A crash in one site is logged and the next site still runs. Returns `{found, saved, failed, sites: {site: {...}}}`.
 - `Scraper/DB.py` — the only file that talks to the database (SQLite). See [Database](#database-scraperdbpy).
@@ -27,8 +27,8 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 ## Current state
 
 ### MerrJep.al scraper (working, v1)
-- Builds page URLs as `BASE_URL`, then `BASE_URL?Page=N`, using a small URL queue. It stops when a page has no listing cards.
-- On each results page it collects unique `data-product-id` values (UPIDs), opens each listing, scrapes it, then goes back.
+- Page URLs come from `page_url(n)`: `BASE_URL` for page 1, then `BASE_URL?Page=N`. It runs in [turns](#turn-based-scraping-both-sites) and stops when a page has no listing cards.
+- On each results page it collects unique `data-product-id` values (UPIDs), drops the ones already seen, then opens each new listing, scrapes it and goes back.
 - On each listing page it pulls:
   - JSON-LD `Product` data: title, price, currency, description and images. If a listing has no JSON-LD, it is skipped.
   - HTML tag attributes (`.tags-area`), stored as a dict.
@@ -38,7 +38,7 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
   - Phone number, read from two places: the contact button (`button .main-contact bdi`) and the `tel:` contact link. `combine_phones()` keeps one number if both match by digits, joins them with `; ` if they differ, and returns `None` if neither exists.
   - Published date and time.
 - It checks that the UPID in the JSON-LD matches the card it clicked on.
-- It runs headless (no window) when `Headless = True` in `config.py`, which is the default. In that mode `launch_browser()` uses `channel="chromium"` and a user agent without "HeadlessChrome", so sites see the same fingerprint as the visible browser. It waits a fixed 5 s after each page load and rests `Rest_Time` seconds after each listing.
+- It runs headless (no window) when `Headless = True` in `config.py`. The repo currently has `False` for debugging. In headless mode `launch_browser()` uses `channel="chromium"` and a user agent without "HeadlessChrome", so sites see the same fingerprint as the visible browser. It waits a fixed 5 s after each page load and rests `Rest_Time` seconds after each listing.
 
 ### GazetaCelesi.al scraper (working, v1)
 - Gazeta Celesi is a Next.js site. Each results page (`https://www.gazetacelesi.al/shtepi/njoftime?page=N`, 20 per page, newest first) embeds its listings as JSON in `<script id="__NEXT_DATA__">` under `props.pageProps.getAdsList.data` (`data` = the ads, `meta` = `currentPage`/`totalPages`).
@@ -55,7 +55,7 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 - Plain HTTP also returns `__NEXT_DATA__` (tested with `FetchHTML --fast`), so `Request.py` with HTTPX could replace Playwright for this site later. **Not yet:** a bare HTTP client is easy for the site to spot (no JS, no scrolling, no browser fingerprint), so for now we stay with Playwright.
 
 ### Turn-based scraping (both sites)
-A run is **one turn**, not a full crawl. Each turn, every site in `Engine.SCRAPERS` scrapes up to `Listings_Per_Turn` (50 in `config.py`, 5 in demo) **new** listings, which the Engine saves before starting the next site. "Start scrape" runs one turn; auto mode runs one turn per interval. A turn ends when the site has given 50 new listings or it runs out of pages, so it can't run forever.
+A run is **one turn**, not a full crawl. Each turn, every site in `Engine.SCRAPERS` scrapes up to `Listings_Per_Turn` (50 in `config.py`, 5 in demo) **new** listings, which the Engine saves before starting the next site. Play in the UI repeats turns, with a break in between, until paused (see [Automatic scraping](#automatic-scraping)). `python3 -m Scraper.Engine` runs a single turn. A turn ends when the site has given 50 new listings, runs out of pages, or the user pauses, so a single turn can't run forever.
 - `DB.get_known_upids(connection, site)` is passed to each scraper as `known_upids`. Known listings are skipped **before** clicking (MerrJep) or mapping (Gazeta). Each page logs "N new, M already seen".
 - Every turn starts at **page 1**, so fresh posts are always picked up first (both sites list newest first). When a page has nothing new, the turn has caught up and jumps to `RESUME_PAGE`, the deepest page any turn has reached, to keep filling in older listings. Each turn digs a little deeper. Once everything is caught up, a turn is only a few page loads.
 - Kept in memory between turns (module globals that `reset_state()` doesn't clear): `RESUME_PAGE`, `AGENCY_UPIDS` (agency cards skipped by "Jo Listime Agjensie", so they don't look new every turn) and `FAILED_UPIDS` (listings that errored, not retried until restart, so one broken listing can't stop a page from counting as caught up).
@@ -65,8 +65,9 @@ A run is **one turn**, not a full crawl. Each turn, every site in `Engine.SCRAPE
 - Tested 2026-11-04: three Gazeta turns of 30 gave 90 unique listings (page 1 → jump to 2 → 3 → 5). Two Engine runs for both sites gave 10 + 10 per site, with no duplicates.
 
 ### Config (`Scraper/config.py`)
-- `Demo_Environment = True` limits each run to `DEMO_LISTING_LIMIT` (5) listings, which is set in the MerrJep scraper. Set it to `False` to scrape every page.
-- `Rest_Time = 3` is the number of seconds to rest after each listing before opening the next one, so requests aren't fired instantly and flagged.
+- `Demo_Environment = True` limits each turn to `DEMO_LISTING_LIMIT` (5) new listings per site, which is set in each scraper. Set it to `False` for real turns of `Listings_Per_Turn`.
+- `Listings_Per_Turn = 50` is how many new listings each site scrapes per turn when demo is off.
+- `Rest_Time = 3` is the number of seconds to rest after each listing (MerrJep) or between pages (Gazeta, plus up to 2 s of random extra), so requests aren't fired instantly and flagged.
 - `Headless`: `True` runs the scraper browser with no window, and `False` shows it so you can watch a scrape.
 - The rescrape interval is **no longer in config**. The old `Rotation_Rescraping_Time` constant was removed, and staff now pick the interval in the UI (see [Automatic scraping](#automatic-scraping)).
 - `Database_Name = "Homesweeper.db"` is the name of the SQLite file inside `Data/`.
@@ -112,19 +113,50 @@ The `listings` table:
 - It skips rows whose `(site, upid)` is already in the sheet.
 - If the file is open in Excel, it prints a warning instead of crashing.
 
+## To do next (prioritized, 2026-11-04)
+The phases below hold the long-term plan. This is the short list of what to pick up next, most important first.
+
+**Before agents use it for real**
+1. **Set `Headless = True` and `Demo_Environment = False`** in `config.py` and do a long real run, for an hour or more, with play on and a 1–5 min break. Watch for blocks or captchas, slow turns, and listings that fail. Nothing has run longer than a few demo turns yet.
+2. **Persist the runtime state** to `settings.json`: play on/off, the break, "Jo Listime Agjensie", and each site's `RESUME_PAGE`. Today a restart pauses scraping and loses the backfill position (Phase 4, step 4).
+3. **Live progress in the UI.** Show "site X, page N, M new so far" during a turn. The status currently only says running/done.
+4. **Working hours.** Only scrape between set hours, so the PC isn't scraping at night.
+
+**Data quality**
+
+5. **Normalise `published_date`** to ISO (`2026-10-03`) for both sites. MerrJep uses Albanian month abbreviations and Gazeta uses `04/11/2026`.
+6. **Merge the condition wording** across sites (`I ri` on MerrJep, `E re` on Gazeta, …), and check `Person privat` against MerrJep's real private-seller wording once one shows up.
+7. **`price_history` plus a re-check pass.** Saved listings are never re-scraped, so price changes and removed listings go unnoticed. Gazeta is cheap to re-check, because its results JSON already has the price.
+8. **Cross-site duplicates.** The same property posted on both sites, or re-posted under a new ID, is stored twice. A fuzzy match on phone + size + price could flag them.
+
+**Code health**
+
+9. **Excel per turn:** `Output.save_listings()` appends to `Output/listings.xlsx` every turn, which grows forever. Decide whether to keep it, or only use the UI's export (Phase 1, step 7).
+10. **MerrJep's fixed 5 s page wait** → wait for an element instead.
+11. **A `requirements.txt`** with pinned versions (Phase 4, step 1), so the next person installs the same versions.
+12. **Logging to a file** instead of only `rich` prints (needed for Phase 4 anyway).
+
+**Product (Phase 4)**
+
+13. **Packaging and auto-update**, in the order in [Phase 4](#phase-4--ship-it-as-a-self-updating-desktop-app) and `CLAUDE.md` → "Product architecture".
+
+**Next site**
+
+14. **Further sites follow the same contract** (see `CLAUDE.md` → Scraper contract): copy the turn helpers from either scraper and add one line to `Engine.SCRAPERS`.
+
 ## The plan (work in this order)
 
-### Phase 1 — Connect the database (next up)
-1. Add `Data/` to `.gitignore`, the same as `Output/`, so listing data is never committed.
-2. Remove the unused `import sqlite3` from `MerrJep_al/PlaywrightScraper1.py`. Only `DB.py` may import `sqlite3`.
+### Phase 1 — Connect the database (done, except step 7)
+1. ~~Add `Data/` to `.gitignore`~~ **Done.**
+2. ~~Remove the unused `import sqlite3` from the MerrJep scraper~~ **Done.** Only `DB.py` may import `sqlite3`.
 3. ~~Turn on WAL mode in `connect_to_db()`~~ **Done.** The UI can read listings while a scrape is writing.
-4. Add these to `DB.py`:
+4. ~~Add these to `DB.py`~~ **Done**:
    - `get_known_upids(site)` returns a set of every saved UPID for that site.
    - `save_listing(listing, site)` inserts a new listing. If it already exists, it updates `last_seen` and the fields that can change (price, phone, description). Use `INSERT ... ON CONFLICT(site, upid) DO UPDATE`. Store `images` and `attributes` with `json.dumps`.
    - `get_listings(site=None)` returns the stored listings for the export, the UI and, later, the agents.
-5. In `Engine.py`, call `connect_to_db()` and `create_tables()` once at startup. Then save each scraped listing with `save_listing()`.
-6. In the MerrJep scraper, load `get_known_upids("merrjep")` before scraping and skip those UPIDs **before** clicking into the listing. That saves a page load and a `Rest_Time` wait per listing.
-7. Change `Output.py` to build the Excel file from `get_listings()`. The database is the main store and Excel is a report. If Excel is open, only the export fails and the scraped data is already safe.
+5. ~~In `Engine.py`, call `connect_to_db()` and `create_tables()` once at startup, then save each listing with `save_listing()`~~ **Done.**
+6. ~~Skip known UPIDs before clicking~~ **Done** for both sites (the Engine passes `get_known_upids(site)` to each scraper).
+7. **Still open:** change `Output.py` to build the Excel file from `get_listings()`. (The UI's export download already does; the engine's per-turn append to `Output/listings.xlsx` doesn't.) The database is the main store and Excel is a report. If Excel is open, only the export fails and the scraped data is already safe.
 
 Rules for this phase:
 - **All SQL lives in `DB.py`.** Scrapers and the engine call its functions. If we ever move to PostgreSQL, only `DB.py` changes.
@@ -136,10 +168,9 @@ Staff won't use a terminal. The app will run as a **local website**: a Python se
 ```
 Browser (localhost:8000)  ──HTTP──▶  Python web server (FastAPI)
   HTML / CSS / JS                      ├── GET  /api/listings      → DB.get_listings()
-  table, filters, buttons              ├── POST /api/auto/start   → play: auto_loop() runs Engine.main() turn after turn in a background thread
-                                       ├── GET  /api/scrape/status → running / done / error + counts + auto mode
-                                       ├── POST /api/auto/start    → auto mode on / change interval {interval_minutes}
-                                       ├── POST /api/auto/stop     → auto mode off
+  cards, filters, buttons              ├── GET  /api/scrape/status → running / done / error + counts + continuous mode
+                                       ├── POST /api/auto/start    → ▶ play: auto_loop() runs Engine.main() turn after turn {interval_minutes = break}
+                                       ├── POST /api/auto/stop     → ⏸ pause: the running turn ends early and saves
                                        ├── POST /api/preferences   → scrape preferences {skip_agencies}
                                        └── GET  /api/export        → download listings.xlsx
 ```
@@ -161,7 +192,7 @@ Later: if several staff need the same data at once, run this same app on one off
 
 - **What the GIL does:** it only stops two threads from running Python bytecode at the exact same instant, which protects the interpreter's own internals. It doesn't stop two threads from both running the same scrape function. They'd just take turns, especially since Playwright spends most of its time waiting on the network and releases the GIL while it waits. (Python 3.14 also has an optional build without the GIL, but the standard `py -3.14` still has it, and it doesn't matter here either way.)
 - **What `SCRAPE_LOCK` does:** it's a rule for the app, "only one scrape at a time." Without it, clicking Start scrape twice, or opening two browser tabs, would start two scrape threads at once, and that causes three problems:
-  1. **The scraper's globals would clash.** `URL_QUEUE`, `PROCESSED_UPIDS`, `SCRAPED_LISTINGS` and `PAGE_COUNT` are module-level, so two runs would share them. Each run calls `reset_state()` at the start and would wipe the other's progress mid-scrape. Pages would be skipped or scraped twice, and the results would mix together.
+  1. **The scraper's globals would clash.** `PROCESSED_UPIDS`, `SCRAPED_LISTINGS` and `RESUME_PAGE` are module-level, so two runs would share them. Each run calls `reset_state()` at the start and would wipe the other's progress mid-scrape. Pages would be skipped or scraped twice, and the results would mix together.
   2. **Traffic to the site.** Two browsers hitting MerrJep at once doubles the request rate and undoes the `Rest_Time` pacing, which raises the chance of being blocked.
   3. **SQLite writes.** SQLite allows only one writer at a time. Two scrapes saving together would mostly just wait for each other, but it's needless contention.
 - **How it's used:** `SCRAPE_LOCK.acquire(blocking=False)` doesn't wait for the lock. If a turn is already running, it fails immediately and `auto_loop()` checks again after `BUSY_RETRY_SECONDS`. The lock is then held for the whole scrape and released in the `finally` block of `run_scrape()`, so it's freed even if the scrape crashes.
@@ -198,12 +229,12 @@ The top bar has a preference dropdown: **Të gjitha listimet** (everything, the 
 - Like auto mode, it lives in server memory, so restarting the server resets it to "everything".
 
 ### Phase 3 — More sites and polish
-1. ~~Start the GazetaCelesi scraper~~ **Done (v1)**; see [Gazeta Celesi scraper](#gazetacelesial-scraper-working-v1). The engine runs both sites one after another. A full run is about 673 pages, so it needs known-UPID skipping (stop after a page of only known listings, since results are newest first) before auto mode is used with `Demo_Environment = False`.
+1. ~~Start the GazetaCelesi scraper~~ **Done (v1)**; see [Gazeta Celesi scraper](#gazetacelesial-scraper-working-v1). The engine runs both sites one after another, in turns.
 2. ~~Automatic scraping mode~~ **Done**; see [Automatic scraping](#automatic-scraping). Follow-ups are listed in [For Alex's Claude](#for-alexs-claude).
 3. Add a `price_history` table so price changes are kept instead of overwritten.
 4. Move per-site settings such as the demo limit and wait times into `config.py` where it makes sense.
 5. Replace the fixed `wait_for_timeout(5000)` with element-based waits.
-6. Use `Request1.py` (HTTPX) where JS rendering isn't needed. It is faster than Playwright.
+6. Use `Request1.py` (HTTPX) where JS rendering isn't needed. It is faster than Playwright. **On hold:** a bare HTTP client is easier for sites to spot, so we stay with Playwright for now.
 7. Add proper logging to the engine.
 8. Later: agent tables and features, and a `status` column on listings (called, interested, sold…).
 
@@ -224,38 +255,59 @@ The architecture and the reasons for it are in **"Product architecture" in `CLAU
 13. A GitHub Actions release pipeline publishing to the public `HomeSweeper-releases` repo.
 
 ## Repository housekeeping
-- `.gitignore` excludes test folders and files, Python caches and `Output/`. `Data/` still needs adding (Phase 1, step 1).
+- `.gitignore` excludes test folders and files, Python caches, `Output/`, `Data/` and `Tools/HTML/`.
 - The old `Test/` folder has been deleted. Dev utilities now live in `Tools/`.
 
 ## For Alex's Claude
 
-### Automatic scraping mode: built (this was Alex's task, now done)
-The base version is in, following the spec that used to be here: an on/off button plus an interval dropdown in the UI, a timer thread inside the server, every run going through `SCRAPE_LOCK`, the wait counted from the end of each run, and a countdown in the status. See [Automatic scraping](#automatic-scraping) for how it works.
+### Automatic scraping: built (this was Alex's task, now done)
+It was built first as an on/off timer, then reworked on 2026-11-04 into **continuous play/pause with turns**. See [Automatic scraping](#automatic-scraping) and [Turn-based scraping](#turn-based-scraping-both-sites). Known-UPID skipping and running both sites inside one lock are done too. **If Alex built his own version** of auto mode, keep the play/pause version and port anything his version does better into it (see "After pulling Alex's commits" below).
 
-Still open, if you want to pick these up:
-- ~~**Most important:** Phase 1, step 6, `get_known_upids(site)`~~ **Done**, together with turn-based scraping (see [Turn-based scraping](#turn-based-scraping-both-sites)). Each auto round is now one turn of up to 50 new listings per site.
-- Make sure `Headless = True` in `config.py` before staff use auto mode, so a Chrome window doesn't pop up every round.
-- Remember auto mode across server restarts (it currently lives in memory and turns off on restart).
-- Only run during working hours, with the hours set in `config.py`.
-- Add a little random jitter to the interval, so the requests don't arrive on an exact clock.
-- ~~When there are more sites (GazetaCelesi), go through them one after another inside the same lock.~~ Done: `Engine.main()` loops over `SCRAPERS`, all inside the one `start_scrape()` lock.
+The remaining follow-ups are in [To do next](#to-do-next-prioritized-2026-11-04). Good ones to pick up:
+- Item 2, persisting the state to `settings.json`.
+- Item 3, live progress.
+- Item 4, working hours.
+- A little random jitter on the break between turns, so turns don't start on an exact clock. Gazeta already jitters between pages.
 
+## Running the project
+Run everything from the **project root**, because the imports are package-style (`Scraper.`, `MerrJep_al.`, `GazetaCelesi.`). Use `py -3.14` on Windows and `python3` on macOS/Linux. Python 3.10 or newer is required (developed on 3.14).
 
-## To run the Engine use the following command:
-Run from the project root (needed for the `Scraper.` / `MerrJep_al.` imports):
+### First-time setup (fresh clone or new PC)
+    py -3.14 -m pip install playwright openpyxl rich httpx requests beautifulsoup4 fastapi uvicorn
+    py -3.14 -m playwright install chromium
 
-    python3 -m Scraper.Engine        (Windows: py -3.14 -m Scraper.Engine)
-    python3 -m Scraper.Server        (web UI at http://127.0.0.1:8000)
-    python3 -m Tools.FetchHTML <url>
+There's no `requirements.txt` yet (to-do item 11), so this list is the source of truth. If someone adds a new import, add it here too.
 
-Dependencies used: `playwright` (plus `playwright install chromium`), `openpyxl`, `rich`, `httpx`, `requests`, `beautifulsoup4`. Phase 2 adds `fastapi` and `uvicorn`.
+### Start it
+    py -3.14 -m Scraper.Server                    # the app: open http://127.0.0.1:8000, Ctrl+C to stop
+    py -3.14 -m Scraper.Engine                    # one turn of both sites in the terminal, no UI
+    py -3.14 -m GazetaCelesi.PlaywrightScraper    # one Gazeta turn only, prints the listings, doesn't touch the DB
+    py -3.14 -m MerrJep_al.PlaywrightScraper1     # one MerrJep turn only, doesn't touch the DB
+    py -3.14 -m Tools.FetchHTML <url>             # save a page's HTML to Tools/HTML/ to study a site's markup
+
+In the UI, choose the break between turns, then press **▶ Nis mbledhjen**. Press **⏸ Pauzë** to stop. New listings appear after every turn, and the blue label counts them.
+
+Check `Scraper/config.py` before a run:
+- `Demo_Environment = True` gives quick turns of 5 new listings per site. `False` gives real turns of `Listings_Per_Turn` (50).
+- `Headless = False` shows the browser window so you can watch it work. `True` hides it.
+
+### After pulling Alex's commits
+1. **Commit or stash your own work before pulling.** The 2026-11-04 work (Gazeta scraper, turns, play/pause) touched `Engine.py`, `Server.py`, `DB.py`, `config.py`, both scrapers and all three `UI/` files. Work on `dev`; `main` is the PR target.
+2. **Pull and resolve conflicts.** The likely spots are `Scraper/Server.py`, `UI/app.js` and `UI/index.html` (if Alex built auto mode his own way) and `MerrJep_al/PlaywrightScraper1.py`. Keep the contract the Engine relies on: each scraper takes `(skip_agencies, known_upids, should_stop)`, and every scrape starts through `start_scrape()`.
+3. **Re-run the first-time setup** if Alex added a dependency (check his new `import` lines).
+4. **The database:** if Alex changed the `listings` table, `CREATE TABLE IF NOT EXISTS` won't apply it. In dev, delete `Data/Homesweeper.db` and let it rebuild (the data is only test data). If nobody changed the table, keep the file.
+5. **Smoke test:** with `Demo_Environment = True`, run `py -3.14 -m Scraper.Engine` twice.
+   - Run 1 should save 5 per site.
+   - Run 2 should log "N new, 5 already seen" and save 5 *different* listings per site.
+   - Then start the server, press play, wait for one turn, press pause, and check that it stops within a few seconds.
+6. **Update `NOTES.md`** (and the `_Last updated_` date) and `CLAUDE.md` for whatever Alex's commit changed.
 
 ## Errors and Potential Errors / Fixes
 At the moment we test and scrape each site one at a time to check errors and exported data. Later we must use asynchronous processes and unique Playwright drivers so each site is scraped safely and quickly in its own instance.
 
 Known gotchas:
 - If `listings.xlsx` is open in Excel, saving fails. Close it and rerun. Phase 1, step 7 removes this problem for the scraped data.
-- The MerrJep scraper keeps its state (`URL_QUEUE`, `PROCESSED_UPIDS`, `SCRAPED_LISTINGS`, `PAGE_COUNT`) in module-level globals. Calling `create_browser_instance()` twice in one process continues from the old state instead of starting fresh. **This must be fixed before the rescrape loop or the web UI.**
-- Listings without JSON-LD `Product` data are skipped and logged as failures.
+- Both scrapers keep their state in module-level globals. `reset_state()` clears the per-turn part (`PROCESSED_UPIDS`, `SCRAPED_LISTINGS`) at the start of every turn. `RESUME_PAGE`, `AGENCY_UPIDS` and `FAILED_UPIDS` carry over on purpose (see [Turn-based scraping](#turn-based-scraping-both-sites)).
+- MerrJep listings without JSON-LD `Product` data fail, are logged, and go into `FAILED_UPIDS`, so they aren't reopened until a restart.
 - The server sends `Cache-Control: no-cache` on every response (`no_stale_ui` middleware in `Server.py`). Without it, browsers kept an old `style.css`/`app.js` after an update, so new UI elements looked unstyled.
 - `create_tables()` won't add new columns to an existing database (see the Database section).
