@@ -131,6 +131,15 @@ The `listings` table:
 
 **Changing the table later:** `CREATE TABLE IF NOT EXISTS` never changes an existing table. During development, delete `Data/Homesweeper.db` and let it rebuild. Once there is real data, use an `ALTER TABLE` step instead.
 
+### UI filters (`UI/app.js`)
+All filtering runs in the browser on the listings the server hands over. `enrich()` derives one shared value per filter from the columns **and the raw `attributes` tags**, because each site words things differently and several fields only exist as tags. Nothing is written back to the DB, so these work on listings that are already saved.
+- **Multi-select dropdowns** (`FACETS`): Lloji, Prona, Qyteti, Gjendja, Mobilimi, Karakteristikat, Postuar nga, Faqja. Ticking several options in one dropdown means *any of them*, except Karakteristikat, where the listing must have *all* ticked features. Listings without the field appear as "Pa të dhëna", and each option shows how many listings it would give with the other filters applied.
+- **Range filters** (`RANGES`): Çmimi, Sipërfaqja, Çmimi për m², Dhoma gjumi, Banjo, Kati. Each one shows **fixed-range buttons** (`presets`, e.g. `300–500 €`, `2`, `Përdhe`); clicking the active button again clears it. The price buttons follow the Lloji filter: rent ranges for "Jepet me qera", sale ranges for "Shitet", both groups otherwise. **Diapazon i lirë** unfolds a two-thumb slider plus typed min/max in Albanian number style. A hand-picked range that matches no button keeps the slider open, and turning the slider off clears that range. Price, m² and €/m² use a log scale because rents and sale prices are orders of magnitude apart. A thumb left at the end means "no limit". By default a range filter hides listings that don't have the field. The "Shfaq edhe njoftimet që nuk e kanë…" checkbox keeps them.
+- **Prices** are compared in EUR, with ALL converted at the fixed `EUR_TO_ALL = 100`. The price slider can show € or Lekë. A price of 0 is treated as "me marrëveshje" (no price). Sorting by price uses the EUR value, so EUR and ALL listings sort together.
+- **Derived fields:** `_type` (from the Gazeta/Duashpi `Kategoria`, otherwise keywords in the title, which is the only source for MerrJep); `_condition` (merges `I ri`/`E re`, `Si i ri`, `Në gjendje të mirë`, `E rinovuar`, `Në ndërtim`, with Duashpi's `I rinovuar` read from its tags); `_furnishing`; `_features` (Ashensor, Parkim / Garazh, Ballkon / Tarracë); `_floor`; `_baths`; `_priceEur`; `_perM2`.
+- **Coverage** (first full turn, 150 listings): m² 138, bedrooms 130, bathrooms 69, floor 64. MerrJep almost never gives floor or bathrooms. The "N nga M" on each slider shows the live count.
+- On phones the panel folds behind a **Filtrat** button. Active filters show as removable chips under the panel.
+
 ### Output (`Scraper/Output.py`)
 - `save_listings(listings, site)` appends rows to the `Listings` sheet in `Output/listings.xlsx`. It creates the file and headers if they are missing.
 - Each attribute key gets its own column, and new keys add new columns.
@@ -153,7 +162,7 @@ The phases below hold the long-term plan. This is the short list of what to pick
 **Data quality**
 
 5. **Normalise `published_date`** to ISO (`2026-10-03`) for every site. MerrJep uses Albanian month abbreviations, while Gazeta and Duashpi use `04/11/2026`.
-6. **Merge the condition wording** across sites (`I ri` on MerrJep, `E re` on Gazeta, …), and check `Person privat` against MerrJep's real private-seller wording once one shows up. Duashpi has no condition field; its tags (`I rinovuar`, `E mobiluar`…) are in `attributes["Detaje të tjera"]` and could be mapped later.
+6. **Merge the condition wording in the scrapers too.** The UI already merges it for display and filtering (see UI filters), but the DB and the Excel export still hold each site's own wording. Do it across sites (`I ri` on MerrJep, `E re` on Gazeta, …), and check `Person privat` against MerrJep's real private-seller wording once one shows up. Duashpi has no condition field; its tags (`I rinovuar`, `E mobiluar`…) are in `attributes["Detaje të tjera"]` and could be mapped later.
 7. **`price_history` plus a re-check pass.** Saved listings are never re-scraped, so price changes and removed listings go unnoticed. Gazeta is cheap to re-check, because its results JSON already has the price.
 8. **Cross-site duplicates.** The same property posted on more than one site, or re-posted under a new ID, is stored twice. A fuzzy match on phone + size + price could flag them.
 
