@@ -3,13 +3,16 @@
 #That JSON holds the full listing (phone, description, all images, all properties), the same data the listing's own page has,
 #so unlike MerrJep we never click into a listing: one page load gives us 20 complete listings.
 #Imports
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from rich import print
+from rich.markup import escape
 from datetime import datetime, timedelta, timezone
 import html
 import json
 import random
 import re
+import time
+import traceback
 from Scraper.config import Demo_Environment, Rest_Time, Headless, Listings_Per_Turn
 
 #Global Variables
@@ -52,52 +55,61 @@ CITY_NAMES = {
 #known_upids are the listings already in the database, they are skipped without any work
 #skip_agencies=True ignores listings posted by agencies (the "Jo Listime Agjensie" preference in the UI)
 #should_stop is checked between listings, when it returns True (the UI's pause button) the turn ends early with what it has so far
+#Whatever goes wrong, the listings collected so far are always handed back (see "Scraper error handling" in NOTES.md)
 def scrape_gazetacelesi(skip_agencies=False, known_upids=(), should_stop=None):
     global STOP_CHECK
     STOP_CHECK = should_stop
     reset_state(known_upids, skip_agencies) #Start fresh every turn, only RESUME_PAGE and the remembered UPIDs carry over
-    page_number = 1 #Always start at the newest posts
-    with sync_playwright() as p:
-        browser, page = launch_browser(p)
-        try:
-            while not turn_over():
-                url = page_url(page_number)
-                print(f"[cyan]Navigating to: {url}[/cyan]")
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-                try:
-                    ads, meta = read_page_data(page)
-                except (PlaywrightTimeoutError, ValueError) as error:
-                    print(f"[yellow]Could not read listings on {url} ({error}), stopping.[/yellow]")
-                    break
-
-                total_pages = meta.get("totalPages") or page_number
-                if not ads:
-                    print(f"[yellow]No listings found on {url}, assuming last page reached.[/yellow]")
-                    clamp_resume_page(total_pages)
-                    break
-
-                all_seen = process_ads(page, ads, skip_agencies)
-                print(f"[green]Page {page_number}/{total_pages} processed. New this turn: {len(SCRAPED_LISTINGS)}/{turn_limit()}[/green]")
-
-                page_number = next_page(page_number, all_seen)
-                if page_number > total_pages:
-                    print("[green]Last page reached, every listing on the site has been seen.[/green]")
-                    clamp_resume_page(total_pages)
-                    break
-                if turn_over():
-                    break
-
-                #Rest before loading the next page to avoid getting flagged
-                rest = Rest_Time + random.uniform(0, PAGE_REST_JITTER)
-                print(f"[cyan]Resting {rest:.1f}s before next page...[/cyan]")
-                page.wait_for_timeout(rest * 1000)
-        finally:
-            browser.close()
-            print(f"[green]Turn done: {len(SCRAPED_LISTINGS)} new listings, next turn continues older listings from page {RESUME_PAGE}[/green]")
+    try:
+        with sync_playwright() as p:
+            browser, page = launch_browser(p)
+            try:
+                run_turn(page, skip_agencies)
+            finally:
+                close_browser(browser)
+        end_turn(PAUSED if stop_requested() else OK)
+    except TurnStop as stop:
+        end_turn(stop.kind, stop.reason)
+    except Exception as error: #The safety net for anything nobody planned for, e.g. a bug in this file
+        end_turn(classify(error), describe(error), show_traceback=True)
+    print(f"[green]Turn done: {len(SCRAPED_LISTINGS)} new listings, next turn continues older listings from page {RESUME_PAGE}[/green]")
 
     #Hand a copy of the scraped listings back to whoever called this function (Engine.py)
     return list(SCRAPED_LISTINGS)
+
+#Function that walks the results pages until the turn is full or paused. Errors are raised and handled by scrape_gazetacelesi()
+def run_turn(page, skip_agencies):
+    page_number = 1 #Always start at the newest posts
+    while not turn_over():
+        url = page_url(page_number)
+        print(f"[cyan]Navigating to: {url}[/cyan]")
+        open_page(page, url)
+        ads, meta = read_page_data(page) #Raises MarkupError if the listings JSON is missing
+
+        total_pages = meta.get("totalPages") or page_number
+        if not ads:
+            #Every turn starts at page 1, which always has listings, so an empty page 1 means something changed on the site
+            if page_number == 1:
+                raise TurnStop(MARKUP, f"no listings on {url}, the site's markup may have changed")
+            print(f"[yellow]No listings found on {url}, assuming last page reached.[/yellow]")
+            clamp_resume_page(total_pages)
+            break
+
+        all_seen = process_ads(page, ads, skip_agencies)
+        print(f"[green]Page {page_number}/{total_pages} processed. New this turn: {len(SCRAPED_LISTINGS)}/{turn_limit()}[/green]")
+
+        page_number = next_page(page_number, all_seen)
+        if page_number > total_pages:
+            print("[green]Last page reached, every listing on the site has been seen.[/green]")
+            clamp_resume_page(total_pages)
+            break
+        if turn_over():
+            break
+
+        #Rest before loading the next page to avoid getting flagged
+        rest = Rest_Time + random.uniform(0, PAGE_REST_JITTER)
+        print(f"[cyan]Resting {rest:.1f}s before next page...[/cyan]")
+        page.wait_for_timeout(rest * 1000)
 
 #Helper function to open the browser, with no window when Headless is True (copied from the MerrJep scraper, see CLAUDE.md gotchas)
 def launch_browser(p):
@@ -118,6 +130,9 @@ def launch_browser(p):
 
 #Helper function to clear the last turn's state and load what this turn should skip
 def reset_state(known_upids=(), skip_agencies=False):
+    global FAIL_STREAK
+    FAIL_STREAK = 0
+    LAST_TURN.update(ended=None, reason=None)
     PROCESSED_UPIDS.clear()
     SCRAPED_LISTINGS.clear()
     PROCESSED_UPIDS.update(str(upid) for upid in known_upids)
@@ -160,22 +175,166 @@ def clamp_resume_page(total_pages):
     global RESUME_PAGE
     RESUME_PAGE = max(1, min(RESUME_PAGE, total_pages))
 
+#---------- Error handling: the same block is copied into every scraper (see "Scraper error handling" in NOTES.md) ----------
+#Every error is sorted into one kind, and each kind has one response. Whatever happens, the turn hands back what it collected.
+PAGE_TIMEOUT_MS = 20000 #One try at loading a page
+PAGE_ATTEMPTS = 2 #Tries per page load: a timeout or network error gets one more try
+RETRY_WAIT_SECONDS = 10 #Pause between the two tries
+CARDS_TIMEOUT_MS = 15000 #How long a loaded results page gets to show its listings
+MAX_FAILS_IN_A_ROW = 3 #Listings failing back to back mean the site changed or is blocking us, so the turn ends
+BLOCKED_STATUSES = (403, 429) #The site refuses us, trying again would only make it worse
+BLOCK_PAGE_TITLES = ("just a moment", "attention required", "access denied", "captcha") #Cloudflare and captcha pages, often sent with HTTP 200
+#How a turn can end. OK and PAUSED are normal endings, the rest are the kinds of error
+OK, PAUSED, TEMPORARY, BLOCKED, MARKUP, BROWSER_GONE, UNEXPECTED = "ok", "paused", "temporary", "blocked", "markup", "browser_gone", "unexpected"
+TEMPORARY_MESSAGES = ("net::err_", "execution context was destroyed", "frame was detached", "interrupted by another navigation")
+BROWSER_GONE_MESSAGES = ("has been closed", "target closed", "browser has disconnected", "page crashed")
+LAST_TURN = {"ended": None, "reason": None} #How the last turn ended (one of the kinds above) and why, for the log and later the UI
+FAIL_STREAK = 0 #Listings that failed back to back this turn
+
+#Raised to end the turn on purpose: kind is one of the kinds above, reason is the text for the log
+class TurnStop(Exception):
+    def __init__(self, kind, reason):
+        super().__init__(reason)
+        self.kind = kind
+        self.reason = reason
+
+#Raised for something worth one more try (a 5xx answer, a listing page that isn't the one we clicked)
+class TemporaryError(Exception):
+    pass
+
+#Raised when a page loaded fine but what we read from it is missing, so the site's markup has probably changed
+class MarkupError(Exception):
+    pass
+
+#Raised when a results page loaded but shows no listings (the caller decides: past the last page, or changed markup)
+class NoListings(Exception):
+    pass
+
+#Function that sorts an error into one of the kinds above
+def classify(error):
+    if isinstance(error, TurnStop):
+        return error.kind
+    if isinstance(error, (PlaywrightTimeoutError, TemporaryError)):
+        return TEMPORARY
+    if isinstance(error, MarkupError):
+        return MARKUP
+    if isinstance(error, PlaywrightError):
+        message = str(error).lower()
+        if any(text in message for text in BROWSER_GONE_MESSAGES):
+            return BROWSER_GONE
+        if any(text in message for text in TEMPORARY_MESSAGES):
+            return TEMPORARY
+    return UNEXPECTED
+
+#Helper function: an error in one line (Playwright adds a long call log after the first line)
+def describe(error):
+    lines = str(error).strip().splitlines()
+    return f"{type(error).__name__}: {lines[0] if lines else ''}"[:300]
+
+#Function to wait between two tries in short steps, so the pause button still works within half a second
+def wait_or_stop(seconds):
+    end = time.monotonic() + seconds
+    while (left := end - time.monotonic()) > 0:
+        if stop_requested():
+            raise TurnStop(PAUSED, "paused while waiting to try again")
+        time.sleep(min(0.5, left))
+
+#Function that ends the turn when the site shows a block page (Cloudflare's "Just a moment", a captcha)
+def check_blocked(page):
+    try:
+        title = page.title().lower()
+    except PlaywrightError:
+        return #The page can't be read, the caller's own error says why
+    if any(text in title for text in BLOCK_PAGE_TITLES):
+        raise TurnStop(BLOCKED, f"the site showed a block page ({title!r})")
+
+#Function to load a page with up to PAGE_ATTEMPTS tries, returns the HTTP status. Raises TurnStop when it can't be loaded.
+#A page that loads but has no listings isn't an error here: the caller decides if it's past the last page or changed markup.
+def open_page(page, url):
+    for attempt in range(1, PAGE_ATTEMPTS + 1):
+        try:
+            response = page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            status = response.status if response else 0
+            if status in BLOCKED_STATUSES:
+                raise TurnStop(BLOCKED, f"HTTP {status} from {url}")
+            check_blocked(page)
+            if status >= 500:
+                raise TemporaryError(f"HTTP {status}")
+            return status
+        except TurnStop:
+            raise
+        except Exception as error:
+            kind = classify(error)
+            if kind != TEMPORARY:
+                raise TurnStop(kind, f"could not load {url}: {describe(error)}") from error
+            if attempt == PAGE_ATTEMPTS:
+                raise TurnStop(TEMPORARY, f"could not load {url} after {PAGE_ATTEMPTS} tries: {describe(error)}") from error
+            print(f"[yellow]Loading {url} failed ({escape(describe(error))}), trying again in {RETRY_WAIT_SECONDS}s...[/yellow]")
+            wait_or_stop(RETRY_WAIT_SECONDS)
+
+#Function to record a listing that failed and decide what happens next, called from inside an except block.
+#Temporary failures get another chance next turn, markup and unexpected ones are remembered in FAILED_UPIDS until a restart.
+#Raises TurnStop when the browser is gone, the site shows a block page, or MAX_FAILS_IN_A_ROW listings failed back to back.
+def listing_failed(page, upid, error):
+    global FAIL_STREAK
+    kind = classify(error)
+    if kind == BROWSER_GONE:
+        raise TurnStop(kind, f"{upid}: {describe(error)}") from error
+    check_blocked(page)
+    PROCESSED_UPIDS.add(upid) #Not again this turn
+    if kind == TEMPORARY:
+        print(f"[yellow]Failed to scrape {upid} ({escape(describe(error))}), it will be tried again next turn.[/yellow]")
+    else:
+        FAILED_UPIDS.add(upid) #Trying again won't help, a broken listing would otherwise stop pages from ever counting as "seen"
+        print(f"[red]Failed to scrape {upid} ({kind}): {escape(describe(error))}[/red]")
+        if kind == UNEXPECTED:
+            print(escape(traceback.format_exc()))
+    FAIL_STREAK += 1
+    if FAIL_STREAK >= MAX_FAILS_IN_A_ROW:
+        raise TurnStop(kind, f"{FAIL_STREAK} listings failed in a row, the last one: {describe(error)}")
+
+#Function to note a listing that worked, which resets the failure streak
+def listing_ok():
+    global FAIL_STREAK
+    FAIL_STREAK = 0
+
+#Function to record how the turn ended and log it (show_traceback only from inside an except block)
+def end_turn(kind, reason=None, show_traceback=False):
+    LAST_TURN.update(ended=kind, reason=reason)
+    if kind in (OK, PAUSED):
+        return
+    print(f"[red]Turn ended early ({kind}): {escape(reason or '')}. The listings found so far are kept.[/red]")
+    if show_traceback:
+        print(escape(traceback.format_exc()))
+
+#Function to close the browser without letting an error while closing hide what the turn found
+def close_browser(browser):
+    try:
+        browser.close()
+    except Exception as error:
+        print(f"[yellow]Could not close the browser cleanly: {escape(describe(error))}[/yellow]")
+#---------- End of the error handling block ----------
+
 #Function to read the listings JSON the site embeds in the page, returns (list of ads, pagination info)
 def read_page_data(page):
     #The script is in the server's HTML, so it's there as soon as the page loads (no fixed 5 s wait needed)
+    #So if it's missing from a page that loaded, the site's markup changed (MarkupError, no retry)
     script = page.locator("script#__NEXT_DATA__")
-    script.wait_for(state="attached", timeout=15000)
+    try:
+        script.wait_for(state="attached", timeout=CARDS_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        raise MarkupError("No __NEXT_DATA__ script on the page") from None
 
     try:
         data = json.loads(script.text_content())
     except json.JSONDecodeError as error:
-        raise ValueError(f"__NEXT_DATA__ is not valid JSON: {error}")
+        raise MarkupError(f"__NEXT_DATA__ is not valid JSON: {error}") from None
 
     #premiumAds (the promoted box repeated on every page) are left out on purpose, they are not part of the real results
     ads_list = data.get("props", {}).get("pageProps", {}).get("getAdsList") or {}
     payload = ads_list.get("data") or {}
     if "data" not in payload:
-        raise ValueError("No getAdsList in __NEXT_DATA__, the site's markup may have changed")
+        raise MarkupError("No getAdsList in __NEXT_DATA__, the site's markup may have changed")
 
     print(f"[cyan]Found {len(payload['data'])} listings on the page.[/cyan]")
     return payload["data"], payload.get("meta") or {}
@@ -207,6 +366,7 @@ def process_ads(page, ads, skip_agencies=False):
             print(f"[yellow]Skipping agency listing: {upid}[/yellow]")
             PROCESSED_UPIDS.add(upid)
             AGENCY_UPIDS.add(upid)
+            listing_ok()
             continue
 
         print(f"[cyan]Processing {i + 1}/{len(new_ads)}: {upid}[/cyan]")
@@ -215,16 +375,18 @@ def process_ads(page, ads, skip_agencies=False):
             data = pull_data_from_ad(ad, results_url)
             SCRAPED_LISTINGS.append(data)
             PROCESSED_UPIDS.add(upid)
+            listing_ok()
 
-            print(f"[green]Scraped: {data['title']}[/green]")
-            print(f"[bright_green]Price: {data['price']} {data['currency']}[/bright_green]")
+            #Scraped text is escaped: rich would read a title like "[/b] SHITET" as markup and raise
+            print(f"[green]Scraped: {escape(str(data['title']))}[/green]")
+            print(f"[bright_green]Price: {data['price']} {escape(str(data['currency']))}[/bright_green]")
             print(f"[bright_green]Images: {len(data['images'])}[/bright_green]")
-            print(f"[bright_green]Phone: {data['phone'] or 'Not available'}[/bright_green]")
+            print(f"[bright_green]Phone: {escape(str(data['phone'] or 'Not available'))}[/bright_green]")
 
+        except TurnStop:
+            raise
         except Exception as error:
-            print(f"[red]Failed to scrape {upid}: {error}[/red]")
-            PROCESSED_UPIDS.add(upid)
-            FAILED_UPIDS.add(upid) #Don't retry it every turn, a broken listing would otherwise stop pages from ever counting as "seen"
+            listing_failed(page, upid, error) #Raises TurnStop when the turn should end
 
     return False
 
@@ -382,4 +544,4 @@ def to_tirana_time(timestamp):
 #Run this file on its own for a quick test: python -m GazetaCelesi.PlaywrightScraper
 if __name__ == "__main__":
     for listing in scrape_gazetacelesi():
-        print(json.dumps(listing, indent=4, ensure_ascii=False))
+        print(escape(json.dumps(listing, indent=4, ensure_ascii=False)))
