@@ -19,8 +19,8 @@
             </div>
         </div>
         <div class="actions">
-            <span id="status" class="status status-idle">Në pritje</span>
-            <span id="auto-status" class="status status-auto" hidden></span>
+            <span id="status" class="status status-idle" role="status" aria-live="polite">Në pritje</span>
+            <span id="auto-status" class="status status-auto" aria-live="polite" hidden></span>
             <!-- Continuous scraping: the break between turns (minutes) + play/pause. The options must match AUTO_INTERVALS in Scraper/Server.py -->
             <div class="auto-group">
                 <select id="auto-interval" title="Sa pushim bën mbledhja mes raundeve" aria-label="Pushimi mes raundeve">
@@ -32,6 +32,14 @@
                     <option value="60">Pushim 1 orë</option>
                 </select>
                 <button id="scrape-btn" class="btn btn-primary" title="Mbledhja vazhdon raund pas raundi derisa ta ndalosh">▶ Nis mbledhjen</button>
+            </div>
+            <!-- Daily start: when ticked, the server turns continuous scraping on at this time every day (POST /api/schedule) -->
+            <div id="schedule-group" class="schedule-group" title="Kur është e ndezur, mbledhja niset vetë çdo ditë në këtë orë dhe vazhdon derisa ta ndalosh. HomeSweeper duhet të jetë i hapur.">
+                <label class="schedule-toggle">
+                    <input id="schedule-on" type="checkbox">
+                    Nis me orar
+                </label>
+                <input id="schedule-time" type="time" value="08:00" required aria-label="Ora e nisjes së mbledhjes">
             </div>
             <!-- Scrape preference, sent to POST /api/preferences and applied from the next turn -->
             <select id="pref-agency" class="top-select" title="Preferenca e mbledhjes, zbatohet në mbledhjen e radhës" aria-label="Preferenca e mbledhjes">
@@ -46,6 +54,24 @@
     </header>
 
     <main>
+        <!-- Two views in one page, switched by the URL hash (#/ and #/ai, #/ai/<search id>) in app.js -->
+        <nav class="views" aria-label="Faqet">
+            <a href="#/" class="view-tab" data-view="listings">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7M5 10v10h14V10"/></svg>
+                Njoftimet
+            </a>
+            <a href="#/ai" class="view-tab" data-view="ai">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
+                Pyet AI
+            </a>
+        </nav>
+
+        <div id="load-error" class="load-error" role="alert" hidden>
+            <span id="load-error-text"></span>
+            <button id="load-retry" class="btn btn-small" type="button">Provo përsëri</button>
+        </div>
+
+        <div id="view-listings" class="view">
         <section class="stats">
             <div class="stat">
                 <span class="stat-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7M5 10v10h14V10"/></svg></span>
@@ -53,7 +79,7 @@
             </div>
             <div class="stat stat-accent">
                 <span class="stat-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M4 5h16l-6 8v5l-4 2v-7z"/></svg></span>
-                <div class="stat-text"><span class="stat-value" id="stat-shown">–</span><span class="stat-label">Përputhen me filtrat</span></div>
+                <div class="stat-text"><span class="stat-value" id="stat-shown" aria-live="polite">–</span><span class="stat-label">Përputhen me filtrat</span></div>
             </div>
             <div class="stat">
                 <span class="stat-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg></span>
@@ -79,11 +105,13 @@
                     <option value="rooms-desc">Më shumë dhoma</option>
                     <option value="title">Titulli A → Z</option>
                 </select>
-                <button id="filters-toggle" class="btn filters-toggle" aria-expanded="false" aria-controls="filters-panel">
-                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
-                    Filtrat <span id="filters-count" class="badge"></span>
-                </button>
-                <button id="f-clear" class="btn btn-ghost">Pastro</button>
+                <div class="filters-actions">
+                    <button id="filters-toggle" class="btn filters-toggle" type="button" aria-expanded="false" aria-controls="filters-panel">
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+                        Filtrat <span id="filters-count" class="badge"></span>
+                    </button>
+                    <button id="f-clear" class="btn btn-ghost" type="button" title="Hiq të gjithë filtrat">Pastro filtrat</button>
+                </div>
             </div>
             <div id="filters-panel" class="filters-panel">
                 <h2 class="panel-title">Kategoritë</h2>
@@ -91,9 +119,11 @@
                 <h2 class="panel-title">Çmimi dhe përmasat</h2>
                 <div id="ranges" class="ranges"></div>
                 <label class="check" title="Jo çdo faqe ka çdo të dhënë (p.sh. MerrJep rrallë jep katin). Kur kjo është e ndezur, njoftimet pa të dhënën e filtruar nuk fshihen.">
-                    <input id="f-missing" type="checkbox">
+                    <input id="f-missing" type="checkbox" checked>
                     Shfaq edhe njoftimet që nuk e kanë të dhënën e filtruar (p.sh. pa kat ose pa m²)
                 </label>
+                <h2 class="panel-title">Shitësit e bllokuar</h2>
+                <div id="blocked-list" class="blocked-list"></div>
             </div>
             <div id="active-filters" class="active-filters" hidden></div>
         </section>
@@ -107,16 +137,159 @@
         <nav id="pager" class="pager" aria-label="Faqet e njoftimeve" hidden></nav>
         <p id="empty" class="empty" hidden>Ende nuk ka njoftime — shtyp <strong>▶ Nis mbledhjen</strong> për të marrë të parat.</p>
         <p id="no-match" class="empty" hidden>Asnjë njoftim nuk përputhet me këta filtra.</p>
+        </div>
+
+        <!-- Pyet AI: the question goes to Claude, which only turns it into filters; the search runs on this PC (Scraper/AI.py) -->
+        <!-- Pyet AI: the question box and the results on the left, the history of every question on the right (on top, folded, on phones).
+             Each search has its own address (#/ai/12), so the back button and a page reload keep it. -->
+        <div id="view-ai" class="view ai-layout" hidden>
+            <aside class="ai-side" aria-label="Historia e pyetjeve">
+                <button id="side-toggle" class="side-toggle" type="button" aria-expanded="false" aria-controls="side-body">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5M12 7v5l3 2"/></svg>
+                    <span>Historia</span>
+                    <span id="side-count" class="side-count"></span>
+                    <svg class="icon side-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+                <div id="side-body" class="side-body">
+                    <div class="side-head">
+                        <h2>
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5M12 7v5l3 2"/></svg>
+                            Historia
+                        </h2>
+                        <button id="new-search" class="btn btn-small" type="button" title="Pyetje e re">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                            E re
+                        </button>
+                    </div>
+                    <label class="side-search">
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                        <input id="history-filter" type="search" placeholder="Kërko te historia…" aria-label="Kërko te historia">
+                    </label>
+                    <div id="history-list" class="side-list"></div>
+                    <p id="history-empty" class="side-empty" hidden>Pyetjet që bën shfaqen këtu. Kliko një për ta hapur përsëri, falas.</p>
+                    <p id="history-total" class="side-total"></p>
+                </div>
+            </aside>
+
+            <div class="ai-main">
+                <section class="ask-card" id="ask-card">
+                    <div class="ask-head">
+                        <span class="ask-icon" aria-hidden="true">
+                            <svg class="icon" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
+                        </span>
+                        <div class="ask-intro">
+                            <h2>Pyet AI</h2>
+                            <p>Shkruaj çfarë po kërkon, ashtu siç do t'ia thoshe një kolegu. AI e kthen pyetjen në filtra dhe kërkon te njoftimet e ruajtura, edhe brenda përshkrimeve.</p>
+                        </div>
+                    </div>
+                    <p id="ai-setup" class="ai-note" hidden>
+                        AI nuk është lidhur ende. Vendos çelësin e API-së në skedarin <code>Data/anthropic_api_key.txt</code> (ose te ndryshorja <code>ANTHROPIC_API_KEY</code>), pastaj provo përsëri. Nuk duhet rinisur serveri.
+                    </p>
+                    <form id="ask-form" class="ask-form">
+                        <textarea id="ask-input" rows="3" maxlength="1000" aria-label="Pyetja për AI"
+                            placeholder="p.sh. Apartament 2+1 me qira në Tiranë, të paktën 50 m², kati 4, i mobiluar, deri në 600 €"></textarea>
+                        <div class="ask-actions">
+                            <span class="ask-hint">Ctrl + Enter për të kërkuar</span>
+                            <button id="ask-btn" class="btn btn-primary" type="submit">
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
+                                Kërko me AI
+                            </button>
+                        </div>
+                    </form>
+                </section>
+
+                <div id="ai-loading" class="ai-loading" hidden>
+                    <span class="spinner" aria-hidden="true"></span>
+                    <div>
+                        <strong>AI po e kupton pyetjen…</strong>
+                        <span id="ai-loading-question" class="ai-loading-q"></span>
+                    </div>
+                </div>
+                <p id="ai-error" class="ai-error" role="alert" hidden></p>
+
+                <!-- Before the first question: what kinds of things can be asked, each with an example to try -->
+                <section id="ai-welcome" class="ai-welcome">
+                    <h2 class="welcome-title">Çfarë mund të pyesësh</h2>
+                    <div id="ai-capabilities" class="capabilities"></div>
+                </section>
+
+                <section id="ai-results" class="ai-results" hidden>
+                    <header class="rs-hero">
+                        <div class="rs-top">
+                            <span class="rs-kicker">Rezultatet për</span>
+                            <span id="ai-when" class="rs-when"></span>
+                        </div>
+                        <h2 id="ai-question" class="rs-question"></h2>
+                        <div class="rs-understood">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
+                            <p id="ai-understood"></p>
+                        </div>
+                        <p id="ai-unsupported" class="ai-note" hidden></p>
+                        <div id="ai-stats" class="rs-stats"></div>
+                        <div class="rs-actions">
+                            <button id="ai-edit" class="btn btn-small" type="button" title="Vendose pyetjen te kutia për ta ndryshuar">
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4"/></svg>
+                                Ndrysho pyetjen
+                            </button>
+                            <button id="ai-reset" class="btn btn-small" type="button" hidden title="Kthe filtrat siç i vendosi AI">
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
+                                Rikthe filtrat e AI
+                            </button>
+                            <span id="ai-cost" class="rs-cost"></span>
+                        </div>
+                    </header>
+
+                    <section class="rs-filters" aria-label="Filtrat">
+                        <div class="rs-group">
+                            <h3>Kërkesa <span>duhet t'i plotësojë</span></h3>
+                            <div id="ai-chips-hard" class="active-filters"></div>
+                        </div>
+                        <div id="ai-soft-group" class="rs-group">
+                            <h3>Dëshira <span>rendisin të parët</span></h3>
+                            <div id="ai-chips-soft" class="active-filters"></div>
+                        </div>
+                        <p class="rs-hint">Kliko ✕ te një filtër për ta hequr. Kërkimi rifillon menjëherë dhe falas, pa e pyetur AI-n përsëri.</p>
+                    </section>
+
+                    <div class="rs-toolbar">
+                        <span id="ai-count" class="rs-count"></span>
+                        <label class="rs-sort">
+                            <span>Rendit</span>
+                            <select id="ai-sort" aria-label="Renditja e rezultateve"></select>
+                        </label>
+                    </div>
+
+                    <div id="ai-cards" class="cards-grid"></div>
+                    <div id="ai-none" class="rs-empty" hidden>
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5M8 11h6"/></svg>
+                        <h3>Asnjë njoftim nuk i plotëson të gjitha kërkesat</h3>
+                        <p id="ai-none-hint">Hiq një nga kërkesat më sipër, ose shkruaje pyetjen ndryshe.</p>
+                    </div>
+                    <div class="more-wrap"><button id="ai-more" class="btn" type="button" hidden>Shfaq më shumë</button></div>
+
+                    <!-- Near misses: listings missing exactly one requirement, shown when the search found little -->
+                    <section id="ai-near" class="rs-near" hidden>
+                        <div class="rs-near-head">
+                            <h3>Pothuajse përputhen</h3>
+                            <p>Këtyre u mungon vetëm një kërkesë, e shënuar me të kuqe te secili.</p>
+                        </div>
+                        <div id="ai-near-cards" class="cards-grid"></div>
+                    </section>
+                </section>
+            </div>
+        </div>
     </main>
 
     <!-- One shared popup for every preview: long text, tags, photo gallery and the full listing -->
-    <dialog id="preview" class="preview">
+    <dialog id="preview" class="preview" aria-labelledby="preview-title">
         <div class="preview-head">
             <h2 id="preview-title"></h2>
             <button id="preview-close" class="btn btn-ghost" aria-label="Mbyll" title="Mbyll">✕</button>
         </div>
         <div id="preview-body" class="preview-body"></div>
     </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <script src="app.js"></script>
 </body>

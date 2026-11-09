@@ -1,10 +1,11 @@
-# Test folders and generated test files
-**/Test/
-**/Tests/
-**/test/
-**/tests/
-**/*_test.py
-**/test_*.py
+# Secrets and build output (the API key lives in Data/, which is ignored below)
+.env
+.env.*
+*.pem
+*.key
+secrets/
+build/
+dist/
 
 # HTML pages saved by Tools/FetchHTML.py
 Tools/HTML/

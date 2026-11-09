@@ -3,6 +3,7 @@ from rich import print
 from MerrJep_al.PlaywrightScraper1 import create_browser_instance as scrape_merrjep
 from GazetaCelesi.PlaywrightScraper import scrape_gazetacelesi
 from Duashpi_al.PlaywrightScraper2 import scrape_duashpi_al
+from Scraper.Console import utf8_output
 from Scraper.Output import save_listings as export_to_excel
 from Scraper.DB import connect_to_db, create_tables, save_listing, get_known_upids
 
@@ -56,8 +57,13 @@ def run_site(connection, site, scrape, skip_agencies, should_stop):
         return {"found": 0, "saved": 0, "failed": 0, "error": str(error)}
     print(f"Engine received {len(listings)} properties from {site}!")
 
-    #Save each listing to the database (the main store)
-    saved = sum(save_listing(connection, listing, site=site) for listing in listings)
+    #Save each listing to the database (the main store). One bad listing must never cost the rest of the turn.
+    saved = 0
+    for listing in listings:
+        try:
+            saved += bool(save_listing(connection, listing, site=site))
+        except Exception as error:
+            print(f"[red]Could not save a {site} listing ({listing.get('upid')}): {error!r}[/red]")
     print(f"[green]Database ({site}): {saved} saved, {len(listings) - saved} failed[/green]")
 
     #Excel is just a report for now, if it fails the data is already safe in the database, so it must never stop the turn
@@ -68,4 +74,5 @@ def run_site(connection, site, scrape, skip_agencies, should_stop):
     return {"found": len(listings), "saved": saved, "failed": len(listings) - saved}
 
 if __name__ == "__main__":
+    utf8_output()
     main()

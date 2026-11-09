@@ -4,18 +4,26 @@ import sqlite3 as sqlite
 import json
 from pathlib import Path
 from rich import print
+from rich.markup import escape
 from Scraper.config import Database_Name
 
 #Global Variables
 DB_FILE = Path(__file__).resolve().parent.parent / "Data" / Database_Name
 
-#Function to connect to the database
-def connect_to_db(db_file=DB_FILE):
+#Raised when the database can't be read, so a broken or locked DB shows as an error instead of as "no listings"
+class DBError(Exception):
+    pass
+
+#Function to connect to the database. quiet=True skips the log line (the server opens a connection for every request).
+def connect_to_db(db_file=DB_FILE, quiet=False):
     try:
         db_file.parent.mkdir(parents=True, exist_ok=True) #Create the Data folder if it doesn't exist yet
         connection = sqlite.connect(db_file)
         connection.execute("PRAGMA journal_mode=WAL") #Lets the UI read while a scrape is writing
-        print(f"[green]Connected to database: {db_file}[/green]")
+        connection.execute("PRAGMA busy_timeout=5000") #Wait up to 5 s for the scrape's write to finish instead of failing at once
+        connection.execute("PRAGMA synchronous=NORMAL") #Safe with WAL and much faster than FULL
+        if not quiet:
+            print(f"[green]Connected to database: {db_file}[/green]")
         return connection
     except sqlite.Error as e:
         print(f"[red]Error connecting to database: {e}[/red]")
@@ -51,6 +59,32 @@ def create_tables(connection):
                     first_seen      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_seen       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE (site, upid) --The same listing can never be saved twice
+                )
+            """)
+            #Every "Pyet AI" question, so the History page can show it and re-run its filters without asking the AI again
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS ai_searches (
+                    id              INTEGER PRIMARY KEY,
+                    question        TEXT NOT NULL,
+                    filters         TEXT NOT NULL, --JSON of Search.Filters, what the AI understood
+                    understood      TEXT,          --The AI's one-sentence summary, Albanian
+                    not_supported   TEXT,          --Parts of the question the filters couldn't express
+                    result_count    INTEGER,       --How many listings matched when it was asked
+                    model           TEXT,
+                    input_tokens    INTEGER,
+                    output_tokens   INTEGER,
+                    cost_usd        REAL,
+                    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            #Sellers the agent doesn't want to see. Their listings stay stored, the server just leaves them out (Derive.is_blocked)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS blocked_sellers (
+                    id              INTEGER PRIMARY KEY,
+                    name            TEXT NOT NULL,             --What the blocked list shows
+                    match_name      TEXT NOT NULL DEFAULT '',  --Normalised name to match on, empty = match on the phones only
+                    phones          TEXT NOT NULL DEFAULT '[]', --JSON list of phone numbers without prefix
+                    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
         print(f"[green]Tables ready in database: {DB_FILE.name}[/green]")
@@ -102,7 +136,8 @@ def save_listing(connection, listing, site):
                     attributes  = excluded.attributes,
                     last_seen   = CURRENT_TIMESTAMP
             """, row)
-        print(f"[green]Listing saved: {row['title']}[/green]")
+        #escape(): a scraped title like "[/b] SHITET" would otherwise be read as rich markup and raise
+        print(f"[green]Listing saved: {escape(str(row['title']))}[/green]")
         return True
     except sqlite.Error as e:
         print(f"[red]Error saving listing {row['upid']}: {e}[/red]")
@@ -116,6 +151,22 @@ def get_known_upids(connection, site):
     except sqlite.Error as e:
         print(f"[red]Error reading known listings for {site}: {e}[/red]")
         return set()
+
+#Function that tells whether the listings changed since last time (count, newest id, latest save), so the server can keep
+#the derived listings in memory and only rebuild them after a scrape saved something
+def listings_version(connection):
+    try:
+        return tuple(connection.execute("SELECT COUNT(*), MAX(id), MAX(last_seen) FROM listings").fetchone())
+    except sqlite.Error as e:
+        raise DBError(str(e)) from e
+
+#Function that returns what the AI questions cost today (UTC day), for the daily spending limit
+def ai_cost_today(connection):
+    try:
+        row = connection.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM ai_searches WHERE created_at >= date('now')").fetchone()
+        return float(row[0] or 0)
+    except sqlite.Error as e:
+        raise DBError(str(e)) from e
 
 #Function to get the stored listings (newest first) for the UI and the Excel export, optionally only one site
 def get_listings(connection, site=None):
@@ -138,4 +189,93 @@ def get_listings(connection, site=None):
         return listings
     except sqlite.Error as e:
         print(f"[red]Error reading listings: {e}[/red]")
+        raise DBError(str(e)) from e
+
+#Function to get the blocked sellers, oldest first. Raises DBError, so a read failure never shows blocked sellers again by accident.
+def get_blocked_sellers(connection):
+    try:
+        rows = connection.execute("SELECT id, name, match_name, phones, created_at FROM blocked_sellers ORDER BY id").fetchall()
+    except sqlite.Error as e:
+        print(f"[red]Error reading blocked sellers: {e}[/red]")
+        raise DBError(str(e)) from e
+    return [{"id": id, "name": name, "match_name": match_name, "phones": json.loads(phones or "[]"), "created_at": created_at}
+            for id, name, match_name, phones, created_at in rows]
+
+#Function to block a seller, returns the new row id (None on error)
+def add_blocked_seller(connection, name, match_name, phones):
+    try:
+        with connection:
+            cursor = connection.execute("INSERT INTO blocked_sellers (name, match_name, phones) VALUES (?, ?, ?)",
+                                        (name, match_name, json.dumps(phones)))
+        return cursor.lastrowid
+    except sqlite.Error as e:
+        print(f"[red]Error blocking seller: {e}[/red]")
+        return None
+
+#Function to unblock a seller, returns True if a row was removed
+def delete_blocked_seller(connection, blocked_id):
+    try:
+        with connection:
+            return connection.execute("DELETE FROM blocked_sellers WHERE id = ?", (blocked_id,)).rowcount > 0
+    except sqlite.Error as e:
+        print(f"[red]Error unblocking seller {blocked_id}: {e}[/red]")
+        return False
+
+#Function to get the distinct cities in the database, so the AI spells places the way the listings do
+def get_known_places(connection):
+    try:
+        rows = connection.execute("SELECT DISTINCT city FROM listings WHERE city IS NOT NULL AND city != '' ORDER BY city")
+        return [city for (city,) in rows]
+    except sqlite.Error as e:
+        print(f"[red]Error reading cities: {e}[/red]")
         return []
+
+#Function to save one AI question with what it was turned into, returns the new row id (None on error)
+def save_ai_search(connection, question, filters_json, understood, not_supported, result_count, model, usage):
+    try:
+        with connection:
+            cursor = connection.execute("""
+                INSERT INTO ai_searches (question, filters, understood, not_supported, result_count, model,
+                                         input_tokens, output_tokens, cost_usd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (question, filters_json, understood, not_supported, result_count, model,
+                  usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cost_usd")))
+        return cursor.lastrowid
+    except sqlite.Error as e:
+        print(f"[red]Error saving AI search: {e}[/red]")
+        return None
+
+#Helper function: one ai_searches row as a dict, with the filters JSON decoded
+def ai_search_row(cursor, row):
+    item = {column[0]: value for column, value in zip(cursor.description, row)}
+    item["filters"] = json.loads(item["filters"] or "{}")
+    return item
+
+#Function to get the saved AI questions, newest first
+def get_ai_searches(connection, limit=200):
+    try:
+        cursor = connection.cursor()
+        cursor.row_factory = ai_search_row
+        return list(cursor.execute("SELECT * FROM ai_searches ORDER BY id DESC LIMIT ?", (limit,)))
+    except sqlite.Error as e:
+        print(f"[red]Error reading AI searches: {e}[/red]")
+        return []
+
+#Function to get one saved AI question by id, None if it doesn't exist
+def get_ai_search(connection, search_id):
+    try:
+        cursor = connection.cursor()
+        cursor.row_factory = ai_search_row
+        return cursor.execute("SELECT * FROM ai_searches WHERE id = ?", (search_id,)).fetchone()
+    except sqlite.Error as e:
+        print(f"[red]Error reading AI search {search_id}: {e}[/red]")
+        return None
+
+#Function to delete one saved AI question, returns True if a row was removed
+def delete_ai_search(connection, search_id):
+    try:
+        with connection:
+            return connection.execute("DELETE FROM ai_searches WHERE id = ?", (search_id,)).rowcount > 0
+    except sqlite.Error as e:
+        print(f"[red]Error deleting AI search {search_id}: {e}[/red]")
+        return False

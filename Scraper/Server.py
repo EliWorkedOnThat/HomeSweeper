@@ -1,19 +1,32 @@
 #This file is the local web server for the UI. It's a thin layer: it only exposes Engine and DB functions as URLs, no scraping logic lives here.
 #Run from the project root with: python3 -m Scraper.Server   (Windows: py -3.14 -m Scraper.Server), then open http://127.0.0.1:8000
 #Imports
+import json
+import os
+import re
+import sys
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from rich import print
-from Scraper.DB import connect_to_db, create_tables, get_listings
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from Scraper import AI
+from Scraper.Console import utf8_output
+from Scraper.DB import (DB_FILE, DBError, add_blocked_seller, ai_cost_today, connect_to_db, create_tables, delete_ai_search,
+                        delete_blocked_seller, get_ai_search, get_ai_searches, get_blocked_sellers, get_known_places, get_listings,
+                        listings_version, save_ai_search)
+from Scraper.Derive import block_rule_of, blocked_rules, is_blocked, with_derived
 from Scraper.Engine import main as run_engine
 from Scraper.Output import build_workbook
+from Scraper.Search import Filters, known_areas, match_reasons, near_misses, search
 
 #Global Variables
 HOST = "127.0.0.1" #Only this PC can reach the server, other devices on the network can't
@@ -21,6 +34,21 @@ PORT = 8000
 UI_DIR = Path(__file__).resolve().parent.parent / "UI"
 AUTO_INTERVALS = (1, 5, 10, 15, 30, 60) #Minutes of break between turns the user can pick (the UI dropdown shows these)
 BUSY_RETRY_SECONDS = 5 #If an automatic run is due while a scrape is still going, check again after this long
+SETTINGS_FILE = DB_FILE.parent / "settings.json" #Settings the agent changes that must survive a restart (for now the daily start)
+SCHEDULE_CHECK_SECONDS = 30 #The auto thread looks at the clock at least this often, a PC waking from sleep can make a long wait overshoot
+TIME_OF_DAY = re.compile(r"([01]\d|2[0-3]):[0-5]\d") #"08:30", what <input type="time"> sends
+LOCAL_HOSTS = ("127.0.0.1", "localhost") #The only Host headers accepted (blocks DNS rebinding, see the middleware below)
+#For a demo through a tunnel only: the tunnel's public name, e.g. HOMESWEEPER_PUBLIC_HOST=name.ts.net. Never set in the shipped app.
+PUBLIC_HOST = os.environ.get("HOMESWEEPER_PUBLIC_HOST", "").strip()
+SHUTDOWN_WAIT_SECONDS = 30 #On quit, how long to wait for a running turn to stop and save what it has
+AI_DAILY_LIMIT_USD = 2.00 #Spending cap for Pyet AI per day (UTC); about 100-200 questions. Protects against loops and abuse.
+#Security headers for every response. The UI has no inline scripts or styles and loads photos from the sites' CDNs.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http: data:; "
+                                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
 
 #Only one scrape at a time, the lock is held for as long as the scrape thread runs (see "How the scrape lock works" in NOTES.md)
 SCRAPE_LOCK = threading.Lock()
@@ -35,6 +63,8 @@ SCRAPE_STATUS = {"state": "idle", "started_at": None, "finished_at": None, "resu
 #Continuous mode (the UI's play/pause button): one turn after another with a break of interval_minutes in between, until paused
 #next_run/last_finished are UTC datetimes, turns/new_listings count what this session has done since play was pressed
 AUTO = {"enabled": False, "interval_minutes": None, "next_run": None, "last_finished": None, "turns": 0, "new_listings": 0}
+#Daily start: at `time` (the PC's clock) continuous mode turns on by itself, as if play was pressed, and runs until paused. Saved in SETTINGS_FILE.
+SCHEDULE = {"enabled": False, "time": "08:00", "interval_minutes": 5, "next_run": None}
 #Scrape preferences picked in the UI, read when each turn starts. Lives in memory like AUTO.
 PREFERENCES = {"skip_agencies": False} #True = "Jo Listime Agjensie", agency listings are ignored
 
@@ -46,13 +76,33 @@ def utc_now():
 def stamp(moment):
     return moment.strftime("%Y-%m-%d %H:%M:%S") if moment else None
 
-#Helper function to open the database for one request and make sure the table exists
+#Helper function to open the database for one request (the tables are created once, when the server starts)
 def open_db():
-    connection = connect_to_db()
+    connection = connect_to_db(quiet=True)
     if connection is None:
-        raise HTTPException(status_code=500, detail="Could not open the database")
-    create_tables(connection)
+        raise HTTPException(status_code=503, detail="Databaza nuk u hap. Rinis HomeSweeper.")
     return connection
+
+#The listings with their derived values, kept in memory and rebuilt only when the DB changed (a scrape saved something).
+#Loading and deriving every listing on each request gets slow with thousands of listings; the dashboard, the AI search
+#and the re-runs all share this copy. Callers must treat the list as read-only.
+LISTINGS_CACHE = {"version": None, "listings": []}
+LISTINGS_LOCK = threading.Lock()
+
+def cached_listings(connection):
+    version = listings_version(connection)
+    with LISTINGS_LOCK:
+        if LISTINGS_CACHE["version"] != version:
+            LISTINGS_CACHE.update(version=version, listings=with_derived(get_listings(connection)))
+        return LISTINGS_CACHE["listings"]
+
+#Helper function: the given listings without the ones from blocked sellers. Used by everything that shows listings.
+def without_blocked(connection, listings):
+    rules = blocked_rules(get_blocked_sellers(connection))
+    return [listing for listing in listings if not is_blocked(listing, rules)] if any(rules) else listings
+
+#Only one AI question at a time: a double click or a stuck page can't send (and pay for) the same question twice in parallel
+AI_LOCK = threading.Lock()
 
 #Helper function for what /api/scrape/status sends to the page
 def status_payload():
@@ -68,6 +118,7 @@ def status_payload():
                 "turns": AUTO["turns"],
                 "new_listings": AUTO["new_listings"],
             },
+            "schedule": {key: SCHEDULE[key] for key in ("enabled", "time", "interval_minutes")},
             "preferences": dict(PREFERENCES),
         }
 
@@ -110,30 +161,106 @@ def run_scrape(preferences):
         SCRAPE_LOCK.release()
         AUTO_WAKE.set()
 
+#Function to turn continuous mode on, or change the break while it's on. The caller holds STATE_LOCK.
+def begin_auto(interval_minutes):
+    was_enabled = AUTO["enabled"]
+    AUTO.update(enabled=True, interval_minutes=interval_minutes)
+    if not was_enabled:
+        AUTO.update(turns=0, new_listings=0) #Count this session from zero
+    PAUSE_EVENT.clear() #Play while a paused turn is still wrapping up: let it carry on instead
+    if SCRAPE_STATUS["state"] == "running":
+        AUTO["next_run"] = None #The running scrape schedules the next one when it finishes
+    elif was_enabled and AUTO["last_finished"]:
+        AUTO["next_run"] = AUTO["last_finished"] + timedelta(minutes=interval_minutes) #New interval, same last run
+    else:
+        AUTO["next_run"] = utc_now() #Just turned on: scrape straight away
+
+#Helper function for the next time the clock shows "HH:MM", as a UTC datetime
+def next_schedule_run(time_of_day):
+    hour, minute = map(int, time_of_day.split(":"))
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return target.astimezone(timezone.utc) #Worked out from the local date, so a daylight-saving change keeps the same clock time
+
+#Function that applies a daily start setting. The caller holds STATE_LOCK (or the server hasn't started its threads yet).
+def apply_schedule(enabled, time_of_day, interval_minutes):
+    SCHEDULE.update(enabled=enabled, time=time_of_day, interval_minutes=interval_minutes,
+                    next_run=next_schedule_run(time_of_day) if enabled else None)
+
+#Function to load the daily start saved in SETTINGS_FILE. A missing or damaged file just means no daily start.
+def load_schedule():
+    try:
+        saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))["schedule"]
+        if TIME_OF_DAY.fullmatch(saved["time"]) and saved["interval_minutes"] in AUTO_INTERVALS:
+            apply_schedule(bool(saved["enabled"]), saved["time"], saved["interval_minutes"])
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"[yellow]Could not read {SETTINGS_FILE.name}, the daily start stays off: {error!r}[/yellow]")
+
+#Function to save the daily start. Written to a temporary file first, so a crash can't leave half a settings file.
+def save_schedule(enabled, time_of_day, interval_minutes):
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SETTINGS_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"schedule": {"enabled": enabled, "time": time_of_day, "interval_minutes": interval_minutes}}), encoding="utf-8")
+    os.replace(temporary, SETTINGS_FILE)
+
 #Function the auto thread runs for the whole life of the server: sleeps until the next run is due, then starts it
 def auto_loop():
     while True:
+        wait = None #None means sleep until something wakes us
+        try:
+            with STATE_LOCK:
+                if SCHEDULE["next_run"] is not None and SCHEDULE["next_run"] <= utc_now():
+                    SCHEDULE["next_run"] = next_schedule_run(SCHEDULE["time"])
+                    if not AUTO["enabled"]: #Already running: leave its break alone
+                        begin_auto(SCHEDULE["interval_minutes"])
+                        print(f"[cyan]Daily start: automatic scraping on at {SCHEDULE['time']}[/cyan]")
+                if AUTO["enabled"] and AUTO["next_run"] is not None:
+                    remaining = (AUTO["next_run"] - utc_now()).total_seconds()
+                    if remaining > 0:
+                        wait = remaining
+                    elif start_scrape():
+                        AUTO["next_run"] = None #run_scrape sets the next one when this run finishes
+                        print(f"[cyan]Turn {AUTO['turns'] + 1} started ({AUTO['interval_minutes']} min break between turns)[/cyan]")
+                    else:
+                        wait = BUSY_RETRY_SECONDS #Safety net: the last turn hasn't released the lock yet, check again shortly
+        except Exception as error:
+            #This thread runs for the server's whole life; if it died, auto mode would silently stop while the UI says it's on
+            print(f"[red]Auto loop error, retrying: {error!r}[/red]")
+            wait = BUSY_RETRY_SECONDS
         with STATE_LOCK:
-            wait = None #None means sleep until something wakes us
-            if AUTO["enabled"] and AUTO["next_run"] is not None:
-                remaining = (AUTO["next_run"] - utc_now()).total_seconds()
-                if remaining > 0:
-                    wait = remaining
-                elif start_scrape():
-                    AUTO["next_run"] = None #run_scrape sets the next one when this run finishes
-                    print(f"[cyan]Turn {AUTO['turns'] + 1} started ({AUTO['interval_minutes']} min break between turns)[/cyan]")
-                else:
-                    wait = BUSY_RETRY_SECONDS #Safety net: the last turn hasn't released the lock yet, check again shortly
+            if SCHEDULE["next_run"] is not None:
+                until_start = max(0, (SCHEDULE["next_run"] - utc_now()).total_seconds())
+                wait = min(until_start, SCHEDULE_CHECK_SECONDS, SCHEDULE_CHECK_SECONDS if wait is None else wait)
         AUTO_WAKE.wait(wait)
         AUTO_WAKE.clear()
 
-#Start the auto thread together with the server
+#Start the auto thread together with the server. On quit, pause a running turn and give it time to save what it found
+#(the scrape thread is a daemon, so without this it would be killed mid-listing and its Chromium could be left behind).
 @asynccontextmanager
 async def lifespan(app):
+    connection = connect_to_db()
+    if connection is not None:
+        create_tables(connection)
+        connection.close()
+    load_schedule()
     threading.Thread(target=auto_loop, daemon=True, name="auto-scrape").start()
     yield
+    with STATE_LOCK:
+        AUTO.update(enabled=False, next_run=None)
+    PAUSE_EVENT.set()
+    if SCRAPE_LOCK.acquire(timeout=SHUTDOWN_WAIT_SECONDS):
+        SCRAPE_LOCK.release()
+    else:
+        print("[yellow]The running turn didn't stop in time; quitting anyway.[/yellow]")
 
-app = FastAPI(title="HomeSweeper", lifespan=lifespan)
+#The interactive API docs are handy in development but have no place in the shipped app
+FROZEN = getattr(sys, "frozen", False)
+app = FastAPI(title="HomeSweeper", lifespan=lifespan,
+              docs_url=None if FROZEN else "/docs", redoc_url=None, openapi_url=None if FROZEN else "/openapi.json")
 
 #Tell the browser to re-check the UI files on every load, otherwise it can keep an old style.css/app.js after an update
 #"no-cache" still allows the cache, it just asks the server first (unchanged files come back as a tiny 304)
@@ -141,7 +268,30 @@ app = FastAPI(title="HomeSweeper", lifespan=lifespan)
 async def no_stale_ui(request, call_next):
     response = await call_next(request)
     response.headers.setdefault("Cache-Control", "no-cache")
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
     return response
+
+#Cross-site requests: the server only listens on this PC, but any website open in the agent's browser can still send requests
+#to 127.0.0.1. Every request that changes something (start/stop scraping, ask the AI, delete history) must come from our own page,
+#which browsers prove with the Origin header. Reads are protected by the Host check below.
+@app.middleware("http")
+async def same_origin_only(request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if not origin or urlsplit(origin).netloc != request.headers.get("host"):
+            return JSONResponse({"detail": "Kërkesa u bllokua: vjen nga një faqe tjetër."}, status_code=403)
+    return await call_next(request)
+
+#DNS rebinding: a website can point its own domain at 127.0.0.1 and read our API as "same origin". Its requests still carry
+#its own domain in the Host header, so only accept ours. Added last, so it runs first.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=[*LOCAL_HOSTS, *([PUBLIC_HOST] if PUBLIC_HOST else [])])
+app.add_middleware(GZipMiddleware, minimum_size=2000) #The listings JSON shrinks about 8-10x
+
+#A database that can't be read shows as an error, never as an empty dashboard
+@app.exception_handler(DBError)
+async def db_error(request: Request, error: DBError):
+    return JSONResponse({"detail": "Databaza nuk u lexua. Provo përsëri pas pak."}, status_code=503)
 
 class AutoRequest(BaseModel):
     interval_minutes: int
@@ -149,12 +299,123 @@ class AutoRequest(BaseModel):
 class PreferencesRequest(BaseModel):
     skip_agencies: bool
 
-#Endpoint: every stored listing (optionally ?site=merrjep)
+class ScheduleRequest(BaseModel):
+    enabled: bool
+    time: str
+    interval_minutes: int
+
+class BlockRequest(BaseModel):
+    listing_id: int
+
+class AskRequest(BaseModel):
+    question: str
+
+class SearchRequest(BaseModel):
+    filters: Filters
+
+AI_QUESTION_MAX = 1000 #Characters; a question is a sentence or two, this only stops accidental pastes
+
+#Endpoint: every stored listing (optionally ?site=merrjep), with the derived filter values (Derive.py) under "derived"
 @app.get("/api/listings")
 def api_listings(site: str | None = None):
     connection = open_db()
     try:
-        return get_listings(connection, site)
+        listings = without_blocked(connection, cached_listings(connection))
+        return [listing for listing in listings if listing["site"] == site] if site else listings
+    finally:
+        connection.close()
+
+#Helper function: run a search over every listing; returns the matching ids in result order,
+#and why each one matched the soft wishes ({id: [Albanian reasons]}), which the result cards show
+#Also returns the near misses (listings failing exactly one requirement) when the search found little:
+#{"ids": [...], "reasons": {id: [...]}, "near": [{"id": 12, "missed": "Kati: 3"}, ...]}
+def run_search(listings, filters):
+    found = search(listings, filters)
+    reasons = match_reasons(found, filters)
+    near = near_misses(listings, filters, len(found))
+    reasons.update({k: v for k, v in match_reasons([listing for listing, _ in near], filters).items() if k not in reasons})
+    return {
+        "ids": [listing["id"] for listing in found],
+        "reasons": {str(k): v for k, v in reasons.items()},
+        "near": [{"id": listing["id"], "missed": missed} for listing, missed in near],
+    }
+
+#Endpoint: is the AI ready (an API key is set)? The page shows a setup note when it isn't
+@app.get("/api/ai/status")
+def api_ai_status():
+    return {"configured": AI.is_configured(), "model": AI.MODEL}
+
+#Endpoint: "Pyet AI". Claude turns the question into filters, the search runs here, and the question is saved to the history
+#A plain def, so FastAPI runs it in a worker thread and the slow API call doesn't block other requests
+@app.post("/api/ai/ask")
+def api_ai_ask(body: AskRequest):
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Shkruaj një pyetje.")
+    if len(question) > AI_QUESTION_MAX:
+        raise HTTPException(status_code=400, detail=f"Pyetja është shumë e gjatë (maksimumi {AI_QUESTION_MAX} shkronja).")
+
+    if not AI_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="Një pyetje tjetër po përpunohet. Prit sa të mbarojë.")
+    connection = None
+    try:
+        connection = open_db()
+        if ai_cost_today(connection) >= AI_DAILY_LIMIT_USD:
+            raise HTTPException(status_code=429, detail=(f"U arrit kufiri ditor i shpenzimeve për AI ({AI_DAILY_LIMIT_USD:.2f} $). "
+                                                         "Kërkimet e ruajtura te historia hapen ende falas."))
+        listings = without_blocked(connection, cached_listings(connection))
+        try:
+            answer = AI.question_to_filters(question, get_known_places(connection), known_areas(listings))
+        except AI.AIError as error:
+            raise HTTPException(status_code=error.status, detail=error.message_sq)
+        results = run_search(listings, answer["filters"])
+        filters_json = answer["filters"].model_dump_json()
+        search_id = save_ai_search(connection, question, filters_json, answer["understood"], answer["not_supported"],
+                                   len(results["ids"]), answer["model"], answer["usage"])
+        return {"search": get_ai_search(connection, search_id) if search_id else None, **results}
+    finally:
+        if connection is not None:
+            connection.close()
+        AI_LOCK.release()
+
+#Endpoint: run a set of filters without the AI (removing a filter chip, or re-opening a search from the history). Free.
+@app.post("/api/ai/search")
+def api_ai_search(body: SearchRequest):
+    connection = open_db()
+    try:
+        return run_search(without_blocked(connection, cached_listings(connection)), body.filters)
+    finally:
+        connection.close()
+
+#Endpoint: the saved AI questions, newest first
+@app.get("/api/ai/history")
+def api_ai_history():
+    connection = open_db()
+    try:
+        return get_ai_searches(connection)
+    finally:
+        connection.close()
+
+#Endpoint: one saved AI question, so a search has its own link (#/ai/12) that survives a page reload
+@app.get("/api/ai/history/{search_id}")
+def api_ai_history_one(search_id: int):
+    connection = open_db()
+    try:
+        found = get_ai_search(connection, search_id)
+        if not found:
+            raise HTTPException(status_code=404, detail="Kjo pyetje nuk u gjet.")
+        return found
+    finally:
+        connection.close()
+
+#Endpoint: delete one saved AI question
+@app.delete("/api/ai/history/{search_id}")
+def api_ai_history_delete(search_id: int):
+    connection = open_db()
+    try:
+        if not delete_ai_search(connection, search_id):
+            raise HTTPException(status_code=404, detail="Kjo pyetje nuk u gjet.")
+        return {"deleted": search_id}
     finally:
         connection.close()
 
@@ -170,17 +431,7 @@ def api_auto_start(body: AutoRequest):
         raise HTTPException(status_code=400, detail=f"interval_minutes must be one of {AUTO_INTERVALS}")
 
     with STATE_LOCK:
-        was_enabled = AUTO["enabled"]
-        AUTO.update(enabled=True, interval_minutes=body.interval_minutes)
-        if not was_enabled:
-            AUTO.update(turns=0, new_listings=0) #Count this session from zero
-        PAUSE_EVENT.clear() #Play while a paused turn is still wrapping up: let it carry on instead
-        if SCRAPE_STATUS["state"] == "running":
-            AUTO["next_run"] = None #The running scrape schedules the next one when it finishes
-        elif was_enabled and AUTO["last_finished"]:
-            AUTO["next_run"] = AUTO["last_finished"] + timedelta(minutes=body.interval_minutes) #New interval, same last run
-        else:
-            AUTO["next_run"] = utc_now() #Just turned on: scrape straight away
+        begin_auto(body.interval_minutes)
     print(f"[cyan]Automatic scraping on: every {body.interval_minutes} min[/cyan]")
     AUTO_WAKE.set()
     return status_payload()
@@ -203,12 +454,86 @@ def api_preferences(body: PreferencesRequest):
     print(f"[cyan]Preferences: skip agency listings = {body.skip_agencies}[/cyan]")
     return status_payload()
 
+#Endpoint: turn the daily start on or off, or change its time. Saved at once, so it survives a restart.
+@app.post("/api/schedule")
+def api_schedule(body: ScheduleRequest):
+    if not TIME_OF_DAY.fullmatch(body.time):
+        raise HTTPException(status_code=400, detail="Ora e nisjes nuk është e saktë.")
+    if body.interval_minutes not in AUTO_INTERVALS:
+        raise HTTPException(status_code=400, detail=f"interval_minutes must be one of {AUTO_INTERVALS}")
+    with STATE_LOCK:
+        try:
+            save_schedule(body.enabled, body.time, body.interval_minutes)
+        except OSError as error:
+            print(f"[red]Could not save the daily start: {error!r}[/red]")
+            raise HTTPException(status_code=500, detail="Orari nuk u ruajt. Provo përsëri.")
+        apply_schedule(body.enabled, body.time, body.interval_minutes)
+    print(f"[cyan]Daily start: {'on at ' + body.time if body.enabled else 'off'}[/cyan]")
+    AUTO_WAKE.set()
+    return status_payload()
+
+#Helper function: find one stored listing (with its derived values) or answer 404
+def stored_listing(connection, listing_id):
+    found = next((listing for listing in cached_listings(connection) if listing["id"] == listing_id), None)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Ky njoftim nuk u gjet.")
+    return found
+
+#Endpoint: the blocked sellers and how many stored listings each one hides
+@app.get("/api/blocked")
+def api_blocked():
+    connection = open_db()
+    try:
+        listings = cached_listings(connection)
+        return [{"id": row["id"], "name": row["name"], "created_at": row["created_at"],
+                 "hidden": sum(is_blocked(listing, blocked_rules([row])) for listing in listings)}
+                for row in get_blocked_sellers(connection)]
+    finally:
+        connection.close()
+
+#Endpoint: who blocking this listing's seller would block and how many listings that hides, for the question the agent confirms
+@app.get("/api/blocked/preview/{listing_id}")
+def api_blocked_preview(listing_id: int):
+    connection = open_db()
+    try:
+        rule = block_rule_of(stored_listing(connection, listing_id))
+        visible = without_blocked(connection, cached_listings(connection))
+        return {"name": rule["name"], "hidden": sum(is_blocked(listing, blocked_rules([rule])) for listing in visible)}
+    finally:
+        connection.close()
+
+#Endpoint: block the seller of a listing. Their listings disappear everywhere, including ones scraped later.
+@app.post("/api/blocked")
+def api_blocked_add(body: BlockRequest):
+    connection = open_db()
+    try:
+        rule = block_rule_of(stored_listing(connection, body.listing_id))
+        if not rule["match_name"] and not rule["phones"]:
+            raise HTTPException(status_code=400, detail="Ky njoftim nuk ka as emër shitësi as telefon.")
+        blocked_id = add_blocked_seller(connection, rule["name"], rule["match_name"], rule["phones"])
+        if blocked_id is None:
+            raise HTTPException(status_code=503, detail="Bllokimi nuk u ruajt. Provo përsëri.")
+        return {"id": blocked_id, "name": rule["name"]}
+    finally:
+        connection.close()
+
+#Endpoint: unblock a seller, their listings come back
+@app.delete("/api/blocked/{blocked_id}")
+def api_blocked_delete(blocked_id: int):
+    connection = open_db()
+    try:
+        if not delete_blocked_seller(connection, blocked_id):
+            raise HTTPException(status_code=404, detail="Ky shitës nuk është i bllokuar.")
+        return {"deleted": blocked_id}
+    finally:
+        connection.close()
+
 #Endpoint: download every stored listing as an Excel file, built fresh from the database
 @app.get("/api/export")
 def api_export():
     connection = open_db()
     try:
-        listings = get_listings(connection)
+        listings = without_blocked(connection, get_listings(connection))
     finally:
         connection.close()
 
@@ -223,5 +548,6 @@ def api_export():
 app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
 if __name__ == "__main__":
+    utf8_output()
     print(f"[green]HomeSweeper running at http://{HOST}:{PORT} — press Ctrl+C to stop it.[/green]")
     uvicorn.run(app, host=HOST, port=PORT)

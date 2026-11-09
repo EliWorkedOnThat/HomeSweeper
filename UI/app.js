@@ -6,7 +6,7 @@
 const POLL_MS = 3000; // How often to check the scrape status while one is running
 const TIME_ZONE = "Europe/Tirane"; // The database stores UTC, staff see Albanian time
 
-// Rough EUR -> ALL rate. Only used to compare, filter and sort prices across the two currencies, never shown as a real price.
+// Rough EUR -> ALL rate, only used to show the price slider in lekë. Must match EUR_TO_ALL in Scraper/Derive.py.
 const EUR_TO_ALL = 100;
 
 const SITE_NAMES = { merrjep: "MerrJep", gazetacelesi: "Gazeta Celësi", duashpi: "Duashpi" };
@@ -22,7 +22,7 @@ const FACETS = [
     { id: "cond", label: "Gjendja", get: (l) => l._condition },
     { id: "furn", label: "Mobilimi", get: (l) => l._furnishing },
     { id: "feat", label: "Karakteristikat", get: (l) => l._features, all: true },
-    { id: "posted", label: "Postuar nga", get: (l) => l.posted_by },
+    { id: "posted", label: "Postuar nga", get: (l) => l._postedBy },
     { id: "site", label: "Faqja", get: (l) => SITE_NAMES[l.site] || l.site },
 ];
 
@@ -38,7 +38,7 @@ const RANGES = [
         presets: () => [[null, 50], [50, 80], [80, 120], [120, 200], [200, null]] },
     { id: "perm2", label: "Çmimi për m²", get: (l) => l._perM2, scale: "log", money: true, perM2: true,
         presets: () => [[null, 1000], [1000, 1500], [1500, 2000], [2000, 3000], [3000, null]] },
-    { id: "rooms", label: "Dhoma gjumi", get: (l) => l.rooms, scale: "int", presets: () => [[1, 1], [2, 2], [3, 3], [4, null]] },
+    { id: "rooms", label: "Dhoma gjumi", get: (l) => l._bedrooms, scale: "int", presets: () => [[1, 1], [2, 2], [3, 3], [4, null]] },
     { id: "baths", label: "Banjo", get: (l) => l._baths, scale: "int", presets: () => [[1, 1], [2, 2], [3, null]] },
     { id: "floor", label: "Kati", get: (l) => l._floor, scale: "int", presets: () => [[0, 0], [1, 3], [4, 7], [8, null]] },
 ];
@@ -56,27 +56,29 @@ const LOG_STEPS = 1000;
 
 // Sort dropdown value -> [listing field, direction]
 const SORTS = {
-    "newest": ["first_seen", "desc"],
-    "oldest": ["first_seen", "asc"],
+    "newest": ["_posted", "desc"], // The posting date (Duashpi: when it was created, not bumped)
+    "oldest": ["_posted", "asc"],
     "price-asc": ["_priceEur", "asc"],
     "price-desc": ["_priceEur", "desc"],
     "perm2-asc": ["_perM2", "asc"],
     "size-desc": ["size_m2", "desc"],
-    "rooms-desc": ["rooms", "desc"],
+    "rooms-desc": ["_bedrooms", "desc"],
     "title": ["title", "asc"],
 };
 
 const filters = {
     facets: Object.fromEntries(FACETS.map((f) => [f.id, new Set()])),
     ranges: Object.fromEntries(RANGES.map((r) => [r.id, { lo: null, hi: null }])), // null = no limit on that side
-    includeMissing: false,
+    includeMissing: true, // On by default: most sites leave some fields empty, and a filter shouldn't silently hide those listings
     currency: "EUR",
+    search: "", // The search box, already lowercased and without accents (read once per keystroke, not per listing)
 };
 
 let allListings = [];
 let pollTimer = null;
 let lastFinished; // finished_at of the last scrape we've seen, a change means new listings to load
 let autoState = null; // The "auto" part of /api/scrape/status
+let scheduleState = null; // The "schedule" part of /api/scrape/status
 let scrapeState = "idle";
 
 const $ = (id) => document.getElementById(id);
@@ -103,13 +105,43 @@ function formatNumber(n) {
     return `${value < 0 ? "-" : ""}${grouped}${decimals ? `,${decimals}` : ""}`;
 }
 
+const CURRENCY_LABELS = { EUR: "€", ALL: "Lekë" };
+
 function formatPrice(price, currency) {
     if (isEmpty(price) || price <= 0) return null; // 0 is how sites mark "me marrëveshje"
-    return `${formatNumber(price)} ${currency || ""}`.trim();
+    return `${formatNumber(price)} ${CURRENCY_LABELS[currency] || currency || ""}`.trim();
+}
+
+// "+355697211116" -> "069 721 1116", the way agents write and read Albanian mobile numbers
+function formatPhone(phone) {
+    const digits = String(phone || "").replace(/\D/g, "");
+    const local = digits.startsWith("355") ? `0${digits.slice(3)}` : digits;
+    return /^0\d{9}$/.test(local) ? `${local.slice(0, 3)} ${local.slice(3, 6)} ${local.slice(6)}` : String(phone || "").trim();
+}
+
+// Links come from scraped data: only real web addresses become clickable
+function safeUrl(url) {
+    return /^https?:\/\//i.test(url || "") ? url : null;
+}
+
+// A short message at the bottom of the screen ("Numri u kopjua")
+let toastTimer;
+function toast(message) {
+    const box = $("toast");
+    box.textContent = message;
+    box.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (box.hidden = true), 2600);
 }
 
 function formatSize(size) {
     return isEmpty(size) ? null : `${formatNumber(size)} m²`;
+}
+
+// "2026-11-04" -> "Postuar 04.11.2026"
+function shortDate(iso) {
+    const [y, m, d] = String(iso).split("-");
+    return d ? `Postuar ${d}.${m}.${y}` : null;
 }
 
 function joinParts(...parts) {
@@ -152,8 +184,9 @@ function debounce(fn, ms) {
 
 function image(src, className) {
     const img = el("img", className);
-    img.src = src;
+    img.src = safeUrl(src) || "";
     img.loading = "lazy";
+    img.decoding = "async";
     img.alt = "";
     img.referrerPolicy = "no-referrer";
     return img;
@@ -161,7 +194,7 @@ function image(src, className) {
 
 function externalLink(className, text, href) {
     const link = el("a", className, text);
-    link.href = href;
+    link.href = safeUrl(href) || "#";
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     return link;
@@ -170,94 +203,57 @@ function externalLink(className, text, href) {
 // ---------- Loading data ----------
 
 async function loadListings() {
-    const response = await fetch("/api/listings");
-    allListings = (await response.json()).map(enrich);
+    let data;
+    try {
+        const response = await fetch("/api/listings");
+        if (!response.ok) throw new Error(await errorText(response));
+        data = await response.json();
+        $("load-error").hidden = true;
+    } catch (error) {
+        $("load-error-text").textContent = error.message && !error.message.includes("fetch")
+            ? error.message
+            : "Njoftimet nuk u ngarkuan. Sigurohu që HomeSweeper është i ndezur.";
+        $("load-error").hidden = false;
+        return;
+    }
+    allListings = data.map(enrich);
+    listingsById = new Map(allListings.map((l) => [l.id, l]));
     computeBounds();
     FACETS.forEach(fillFacetOptions);
     RANGES.forEach((r) => syncRange(r));
     draw();
 }
 
-// ---------- Deriving filter fields ----------
-// Each site words things its own way and some fields only live inside the raw tags, so the UI works out one shared
-// value per filter here. Nothing is written back to the database.
+// ---------- Filter fields ----------
+// The shared filter values (property type, merged condition, furnishing, features, floor, bathrooms, price in EUR) are worked
+// out on the server by Scraper/Derive.py and arrive under l.derived, so the dashboard and the AI search use the same rules.
 
 // Lowercase without accents, so "Tokë", "TOKE" and "toke" all match /toke/
 function norm(text) {
     return String(text ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
-// First match wins, so the more specific kinds come first
-const PROPERTY_TYPES = [
-    ["Ambient biznesi", /ambient|ambjent|biznes|dyqan|\bzyr[ae]|magazin|\blokal|hapesire|kapanon/],
-    ["Tokë", /\btoke\b|\btruall|\bterren/],
-    ["Garsoniere", /garsonier|garsionier|gasonier|studio|papafingo/],
-    ["Vilë / Shtëpi private", /\bvil[ae]\b|pjese vile|shtepi private|shtepi \d+ kat|shtepi me oborr|\d+ katesh/],
-    ["Apartament", /apartament|aprtament|apartment|\d\s*\+\s*\d|duplex|dupleks|penthouse|\bpenthause/],
-];
-
-// Gazeta's and Duashpi's own category comes first (it's structured). MerrJep has none, so its title decides.
-function propertyType(l) {
-    const category = norm((l.attributes || {})["Kategoria"]);
-    for (const text of [category, norm(l.title)]) {
-        const hit = PROPERTY_TYPES.find(([, pattern]) => pattern.test(text));
-        if (hit) return hit[0];
-    }
-    return null;
-}
-
-// MerrJep says "I ri" / "I përdorur - Si i ri", Gazeta "E re" / "Ne gjendje te mire", Duashpi only has tags
-function conditionOf(l, tags) {
-    const c = norm(l.condition);
-    if (/si i ri|si e re/.test(c)) return "Si e re";
-    if (/rikonstru|rinovu/.test(c)) return "E rinovuar";
-    if (/ndertim/.test(c)) return "Në ndërtim";
-    if (/gjendje te mire|perdorur/.test(c)) return "Në gjendje të mirë";
-    if (/^(i ri|e re)$/.test(c.trim())) return "E re";
-    if (c) return l.condition;
-    if (/rinovuar|rikonstruktuar/.test(tags)) return "E rinovuar";
-    if (/ndertese e re/.test(tags)) return "E re";
-    return null;
-}
-
-// Gazeta "Mobilimi", MerrJep "Për vendbanimin: …E mobiluar", Duashpi "Detaje të tjera: E pa mobiluar, …"
-function furnishingOf(tags) {
-    if (/pjeserisht e mobiluar/.test(tags)) return "Pjesërisht e mobiluar";
-    if (/pa ?mobiluar/.test(tags)) return "E pamobiluar";
-    if (/mobiluar/.test(tags)) return "E mobiluar";
-    return null;
-}
-
-function featuresOf(tags) {
-    const features = [];
-    if (/ashensor/.test(tags) && !/ashensor: jo/.test(tags)) features.push("Ashensor");
-    if (/parkim|garazh/.test(tags) && !/parkim[^:|]*: 0\b/.test(tags)) features.push("Parkim / Garazh");
-    if (/ballkon|terrac|tarrac|veranda/.test(tags)) features.push("Ballkon / Tarracë");
-    return features;
-}
-
-function firstInt(value) {
-    if (isEmpty(value)) return null;
-    if (/perdhe/.test(norm(value))) return 0; // Ground floor
-    const n = parseInt(String(value).match(/-?\d+/)?.[0], 10);
-    return isNaN(n) ? null : n;
-}
-
-// Adds the _fields the filters use. The raw columns stay as scraped.
+// Copies the server's derived values onto the _fields the filters and cards use. The raw columns stay as scraped.
 function enrich(l) {
+    const d = l.derived || {};
     const a = l.attributes || {};
-    const tags = norm(Object.entries(a).map(([k, v]) => `${k}: ${v}`).join(" | "));
-    l._type = propertyType(l);
-    l._condition = conditionOf(l, tags);
-    l._furnishing = furnishingOf(tags);
-    l._features = featuresOf(tags);
-    l._floor = firstInt(a["Kati"] ?? a["Kati (Numri i kateve)"]);
-    l._baths = firstInt(a["Banjo"] ?? a["Tualete"]);
-    l._priceEur = l.price > 0 ? (l.currency === "ALL" ? l.price / EUR_TO_ALL : l.price) : null; // 0 means "me marrëveshje"
-    l._perM2 = l._priceEur && l.size_m2 > 0 ? l._priceEur / l.size_m2 : null;
-    l._haystack = [l.title, l.description, l.address, l.city, l.phone, l.seller, l.upid, ...Object.entries(a).flat()]
-        .join(" ")
-        .toLowerCase();
+    l._type = d.property_type ?? null;
+    l._condition = d.condition ?? null;
+    l._furnishing = d.furnishing ?? null;
+    l._features = d.features || [];
+    l._floor = d.floor ?? null;
+    l._baths = d.baths ?? null;
+    l._centerKm = d.center_km ?? null; // Only Duashpi gives it ("1.2km nga qendra")
+    l._posted = d.posted ?? null; // ISO date the listing was posted (Derive.posted_date)
+    l._bedrooms = d.bedrooms ?? l.rooms ?? null; // "2+1" -> 2, MerrJep's rooms column sometimes counts the living room too
+    l._postedBy = d.posted_by ?? l.posted_by ?? null; // Duashpi leaves private sellers empty
+    l._priceEur = d.price_eur ?? null;
+    l._perM2 = d.price_per_m2 ?? null;
+    // Searched without accents (agents often type "tirane"), and the phone as digits with and without 355
+    const digits = (l.phone || "").replace(/\D/g, "");
+    const phones = digits ? [digits, digits.startsWith("355") ? `0${digits.slice(3)}` : digits] : [];
+    l._haystack = norm([l.title, l.description, l.address, l.city, l.phone, ...phones, l.seller, l.upid, ...Object.entries(a).flat()]
+        .join(" "));
     return l;
 }
 
@@ -291,8 +287,7 @@ function matches(l, skipFacet) {
         if (lo !== null && v < lo - 1e-9) return false;
         if (hi !== null && v > hi + 1e-9) return false;
     }
-    const search = $("f-search").value.trim().toLowerCase();
-    return !search || l._haystack.includes(search);
+    return !filters.search || l._haystack.includes(filters.search);
 }
 
 function filteredListings() {
@@ -529,16 +524,18 @@ function sliderInput(r, side) {
     input.step = "1";
     input.setAttribute("aria-label", `${r.label} ${side === "lo" ? "minimumi" : "maksimumi"}`);
     input.addEventListener("input", () => {
-        let lo = Number(r.loIn.value), hi = Number(r.hiIn.value);
-        if (lo > hi) { // Thumbs can't cross
-            if (side === "lo") r.loIn.value = lo = hi;
-            else r.hiIn.value = hi = lo;
-        }
+        // The thumbs may pass each other, the lower one is always the minimum. So two thumbs on the same spot can never get stuck:
+        // the top one is the one grabbed, and it can go either way.
+        const lo = Math.min(Number(r.loIn.value), Number(r.hiIn.value));
+        const hi = Math.max(Number(r.loIn.value), Number(r.hiIn.value));
         const state = filters.ranges[r.id];
         state.lo = lo <= posMin(r) ? null : posToValue(r, lo) / factor(r);
         state.hi = hi >= posMax(r) ? null : posToValue(r, hi) / factor(r);
         syncRange(r, false);
         renderSoon();
+    });
+    input.addEventListener("change", () => { // Released: thumbs that crossed go back to their own sides
+        if (Number(r.loIn.value) > Number(r.hiIn.value)) [r.loIn.value, r.hiIn.value] = [r.hiIn.value, r.loIn.value];
     });
     return input;
 }
@@ -576,11 +573,10 @@ function syncRange(r, moveThumbs = true) {
         r.hiIn.value = state.hi === null ? max : valueToPos(r, state.hi * f);
     }
     const span = max - min || 1;
-    const a = ((r.loIn.value - min) / span) * 100;
-    const b = ((r.hiIn.value - min) / span) * 100;
+    const a = ((Math.min(r.loIn.value, r.hiIn.value) - min) / span) * 100;
+    const b = ((Math.max(r.loIn.value, r.hiIn.value) - min) / span) * 100;
     r.fillEl.style.left = `${a}%`;
     r.fillEl.style.right = `${100 - b}%`;
-    r.loIn.style.zIndex = a > 95 ? 3 : 1; // When both thumbs sit at the right end, the min one must stay grabbable
 
     r.loText.value = state.lo === null ? "" : formatNumber(roundShown(state.lo * f));
     r.hiText.value = state.hi === null ? "" : formatNumber(roundShown(state.hi * f));
@@ -651,8 +647,9 @@ function renderActive() {
 
 function clearFilters() {
     $("f-search").value = "";
+    filters.search = "";
     $("f-sort").value = "newest";
-    $("f-missing").checked = filters.includeMissing = false;
+    $("f-missing").checked = filters.includeMissing = true; // Back to the default
     FACETS.forEach((f) => {
         filters.facets[f.id].clear();
         syncFacet(f);
@@ -831,6 +828,7 @@ const ICONS = {
     floor: "M4 20h4v-4h4v-4h4V8h4",
     pin: "M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11zM12 7.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z",
     phone: "M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2",
+    ban: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM5.6 5.6l12.8 12.8",
     camera: "M4 8h3l2-3h6l2 3h3v11H4zM12 10a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z",
     external: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
     image: "M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9.5a1.5 1.5 0 1 0 0 .01",
@@ -893,7 +891,7 @@ function buildCard(l) {
     priceRow.append(el("div", "card-price", formatPrice(l.price, l.currency) || "Çmimi me marrëveshje"));
     const priceNote = joinParts(
         l.currency === "ALL" && l._priceEur ? `≈ ${formatNumber(Math.round(l._priceEur))} €` : null,
-        l._perM2 ? `${formatNumber(Math.round(l._perM2))} €/m²` : null,
+        l._perM2 >= 1 && l.listing_type !== "Jepet me qera" ? `${formatNumber(Math.round(l._perM2))} €/m²` : null,
     );
     if (priceNote) priceRow.append(el("div", "card-price-note", priceNote));
     const where = box(null, joinParts(l.city, l.address), { extraClass: "box-plain box-loc", previewTitle: "Adresa" });
@@ -904,15 +902,16 @@ function buildCard(l) {
     const specs = el("div", "specs");
     [
         ["area", formatSize(l.size_m2)],
-        ["bed", isEmpty(l.rooms) ? null : `${l.rooms} dhoma`],
+        ["bed", isEmpty(l._bedrooms) ? null : `${l._bedrooms} dhoma gjumi`],
         ["bath", isEmpty(l._baths) ? null : `${l._baths} banjo`],
         ["floor", isEmpty(l._floor) ? null : l._floor === 0 ? "Përdhe" : `Kati ${l._floor}`],
+        ["pin", isEmpty(l._centerKm) ? null : `${formatNumber(l._centerKm)} km nga qendra`],
     ].filter(([, text]) => text).forEach(([name, text]) => specs.append(withIcon(name, "spec", text)));
     if (!specs.children.length) specs.append(el("span", "spec muted", "Pa të dhëna për përmasat"));
 
     // Quick chips: kind of property, condition, furnishing, who posted it (sale/rent and the site sit on the photo)
     const chips = el("div", "chips");
-    [l._type, l._condition, l._furnishing, l.posted_by]
+    [l._type, l._condition, l._furnishing, l._postedBy]
         .filter((c) => !isEmpty(c))
         .forEach((c) => chips.append(el("span", "chip", c)));
 
@@ -920,7 +919,7 @@ function buildCard(l) {
     const facts = el("div", "facts");
     facts.append(
         // Most useful first: the card has a fixed height, so the last boxes fade out (all of it is in "Detajet")
-        box("Telefoni", l.phone),
+        box("Telefoni", (l.phone || "").split(/[,;]/).map(formatPhone).filter(Boolean).join(", ") || null),
         box("Shitësi", l.seller),
         box("Përshkrimi", l.description, { lines: 3, wide: true }),
         box("Publikuar", joinParts(l.published_date, l.published_time)),
@@ -931,15 +930,25 @@ function buildCard(l) {
 
     // Footer: ID, link to the original listing, full details
     const footer = el("div", "card-footer");
-    footer.append(el("span", "card-id", `${l.site || ""} #${l.upid}`));
+    footer.append(el("span", "card-id", joinParts(SITE_NAMES[l.site] || l.site, l._posted ? shortDate(l._posted) : null)));
+    if (canBlock(l)) footer.append(blockButton(l));
     const links = el("div", "card-links");
     const tel = (l.phone || "").split(/[,;/]/)[0].replace(/[^\d+]/g, "");
     if (tel) {
         const call = el("a", "btn btn-small btn-call");
+        // Phones dial; on a computer tel: opens Teams/Skype or nothing, so the number is copied instead
         call.href = `tel:${tel}`;
-        call.title = `Telefono ${tel}`;
-        call.setAttribute("aria-label", `Telefono ${tel}`);
+        call.title = `Telefono ${formatPhone(tel)}`;
+        call.setAttribute("aria-label", `Telefono ${formatPhone(tel)}`);
         call.append(icon("phone"), el("span", null, "Telefono"));
+        call.addEventListener("click", (e) => {
+            if (!matchMedia("(pointer: fine)").matches || !navigator.clipboard) return;
+            e.preventDefault();
+            navigator.clipboard.writeText(formatPhone(tel)).then(
+                () => toast(`Numri u kopjua: ${formatPhone(tel)}`),
+                () => (location.href = `tel:${tel}`),
+            );
+        });
         links.append(call);
     }
     if (l.url) {
@@ -1071,16 +1080,17 @@ function openDetails(l) {
         ["Mobilimi", l._furnishing],
         ["Karakteristikat", l._features.join(", ")],
         ["Sipërfaqja", formatSize(l.size_m2)],
-        ["Dhoma", l.rooms],
+        ["Dhoma gjumi", l._bedrooms],
         ["Banjo", l._baths],
-        ["Kati", l._floor],
+        ["Kati", l._floor === 0 ? "Përdhe" : l._floor],
+        ["Larg qendrës", isEmpty(l._centerKm) ? null : `${formatNumber(l._centerKm)} km`],
         ["Qyteti", l.city],
         ["Adresa", l.address],
-        ["Postuar nga", l.posted_by],
+        ["Postuar nga", l._postedBy],
         ["Telefoni", l.phone],
         ["Shitësi", l.seller],
         ["Publikuar", joinParts(l.published_date, l.published_time)],
-        ["Faqja", l.site],
+        ["Faqja", SITE_NAMES[l.site] || l.site],
         ["ID e njoftimit", l.upid],
         ["Parë për herë të parë", localTime(l.first_seen)],
         ["Parë për herë të fundit", localTime(l.last_seen)],
@@ -1106,6 +1116,12 @@ function openDetails(l) {
         wrap.append(linkSection);
     }
 
+    if (canBlock(l)) {
+        const blockSection = el("div", "preview-section");
+        blockSection.append(blockButton(l));
+        wrap.append(blockSection);
+    }
+
     openPreview(l.title || "Njoftimi", wrap);
 }
 
@@ -1124,6 +1140,7 @@ async function checkStatus() {
     }
 
     showStatus(status);
+    showSchedule(status.schedule, status.auto);
     showAuto(status.auto);
     showPreferences(status.preferences);
 
@@ -1132,7 +1149,7 @@ async function checkStatus() {
     }
     lastFinished = status.finished_at;
 
-    if (status.state === "running" || status.auto.enabled) {
+    if (status.state === "running" || status.auto.enabled || status.schedule.enabled) { // A daily start can begin at any moment
         pollTimer = setTimeout(checkStatus, POLL_MS);
     }
 }
@@ -1183,7 +1200,11 @@ function showAuto(auto) {
 function updateCountdown() {
     const pill = $("auto-status");
     if (!autoState || !autoState.enabled) {
-        pill.hidden = true;
+        pill.hidden = !scheduleState?.enabled;
+        if (scheduleState?.enabled) {
+            pill.textContent = `Niset çdo ditë në ${scheduleState.time}`;
+            pill.title = "Mbledhja niset vetë në këtë orë, për sa kohë HomeSweeper është i hapur.";
+        }
         return;
     }
     pill.hidden = false;
@@ -1234,12 +1255,113 @@ async function toggleAuto() {
 
 // Changing the interval while auto mode is on applies it straight away
 async function changeAutoInterval() {
+    if (scheduleState?.enabled) await saveSchedule(); // The daily start uses this break too
     if (!autoState || !autoState.enabled) return;
     try {
         await startAuto();
     } finally {
         checkStatus();
     }
+}
+
+// ---------- Daily start ----------
+
+function showSchedule(schedule, auto) {
+    scheduleState = schedule;
+    $("schedule-on").checked = schedule.enabled;
+    if (document.activeElement !== $("schedule-time")) $("schedule-time").value = schedule.time; // Never change it under the agent's fingers
+    $("schedule-group").classList.toggle("on", schedule.enabled);
+    if (schedule.enabled && !auto.enabled) $("auto-interval").value = String(schedule.interval_minutes);
+}
+
+async function saveSchedule() {
+    const time = $("schedule-time").value;
+    if (!time) { // The time box was emptied
+        $("schedule-on").checked = Boolean(scheduleState?.enabled);
+        toast("Zgjidh orën e nisjes.");
+        return;
+    }
+    try {
+        await postJSON("/api/schedule", {
+            enabled: $("schedule-on").checked,
+            time,
+            interval_minutes: Number($("auto-interval").value),
+        });
+    } catch {
+        alert("Orari nuk u ruajt. Provo përsëri.");
+    }
+    await checkStatus();
+}
+
+// ---------- Blocked sellers ----------
+
+const countListings = (n) => `${formatNumber(n)} ${n === 1 ? "njoftim" : "njoftime"}`;
+const canBlock = (l) => !isEmpty(l.seller) || !isEmpty(l.phone);
+
+function blockButton(l) {
+    const button = el("button", "card-block");
+    button.type = "button";
+    button.title = `Fshih njoftimet e ${l.seller || "këtij shitësi"}`;
+    button.append(icon("ban"), el("span", null, "Blloko shitësin"));
+    button.addEventListener("click", () => blockSeller(l));
+    return button;
+}
+
+// The server decides who the seller is and counts what would go, so the agent sees it before agreeing
+async function blockSeller(l) {
+    try {
+        const response = await fetch(`/api/blocked/preview/${l.id}`);
+        if (!response.ok) throw new Error(await errorText(response));
+        const { name, hidden } = await response.json();
+        if (!confirm(`Të bllokohet “${name}”?\n\nDo të fshihen ${countListings(hidden)}, si dhe ato që do të vijnë më vonë. Mund ta zhbllokosh te Filtrat.`)) return;
+        await postJSON("/api/blocked", { listing_id: l.id });
+        if (dialog.open) dialog.close();
+        await refreshAfterBlock();
+        toast(`“${name}” u bllokua.`);
+    } catch (error) {
+        alert(error.message && !error.message.includes("fetch") ? error.message : "Serveri nuk përgjigjet. Sigurohu që është i ndezur.");
+    }
+}
+
+async function unblockSeller(item) {
+    try {
+        const response = await fetch(`/api/blocked/${item.id}`, { method: "DELETE" });
+        if (!response.ok) throw new Error(await errorText(response));
+        await refreshAfterBlock();
+        toast(`“${item.name}” u zhbllokua.`);
+    } catch (error) {
+        alert(error.message && !error.message.includes("fetch") ? error.message : "Serveri nuk përgjigjet. Sigurohu që është i ndezur.");
+    }
+}
+
+// The server leaves blocked sellers out of every result, so everything on screen is fetched again
+async function refreshAfterBlock() {
+    listingsReady = loadListings();
+    await Promise.all([listingsReady, loadBlocked()]);
+    if (aiState) rerunAIFilters();
+}
+
+async function loadBlocked() {
+    let items;
+    try {
+        const response = await fetch("/api/blocked");
+        if (!response.ok) return;
+        items = await response.json();
+    } catch {
+        return; // The offline pill already says the server is gone
+    }
+    if (!items.length) {
+        $("blocked-list").replaceChildren(el("span", "muted", "Asnjë shitës i bllokuar. Përdor “Blloko shitësin” te një njoftim."));
+        return;
+    }
+    $("blocked-list").replaceChildren(...items.map((item) => {
+        const row = el("div", "blocked-item");
+        const unblock = el("button", "btn btn-small", "Zhblloko");
+        unblock.type = "button";
+        unblock.addEventListener("click", () => unblockSeller(item));
+        row.append(el("span", "blocked-name", item.name), el("span", "blocked-hidden", countListings(item.hidden)), unblock);
+        return row;
+    }));
 }
 
 // ---------- Scrape preferences ----------
@@ -1276,14 +1398,563 @@ async function changePreferences() {
     }
 }
 
+// ---------- Views (Njoftimet / Pyet AI) ----------
+
+// The URL hash picks the view: #/ is the dashboard, #/ai the question page, #/ai/12 one saved search.
+// So the browser's back button, bookmarks and a page reload all keep the search the agent was looking at.
+function route() {
+    const hash = location.hash;
+    if (hash === "#/historia") {
+        location.replace("#/ai"); // Old link: the history now sits beside the AI results
+        return { view: "ai", searchId: null };
+    }
+    const match = hash.match(/^#\/ai(?:\/(\d+))?$/);
+    if (match) return { view: "ai", searchId: match[1] ? Number(match[1]) : null };
+    return { view: "listings", searchId: null };
+}
+
+function showView() {
+    const { view, searchId } = route();
+    ["listings", "ai"].forEach((name) => ($(`view-${name}`).hidden = name !== view));
+    document.querySelectorAll(".view-tab").forEach((tab) => {
+        if (tab.dataset.view === view) tab.setAttribute("aria-current", "page");
+        else tab.removeAttribute("aria-current");
+    });
+    if (view === "listings") {
+        requestAnimationFrame(() => markOverflow($("cards")));
+        return;
+    }
+    checkAIStatus();
+    loadHistory();
+    if (searchId === null) showWelcome();
+    else if (aiState?.search?.id !== searchId) openSearch(searchId);
+}
+
+// ---------- Pyet AI ----------
+
+const AI_PAGE = 24; // Result cards shown at first and per "Shfaq më shumë"
+
+// "Çfarë mund të pyesësh": the kinds of questions the AI understands, each with one example to try
+const AI_CAPABILITIES = [
+    ["pin", "Vendi dhe qendra", "Qytet, zonë, rrugë, “në qendër”, “jo në Kombinat”", "Apartament në qendër të Tiranës, jo në Kombinat"],
+    ["tag", "Çmimi dhe sipërfaqja", "Deri, mbi, “rreth”, € ose lekë, çmimi për m²", "Rreth 120 mijë euro dhe rreth 100 m² në shitje"],
+    ["floor", "Kati, dhomat, banjot", "“2+1”, “kati i 4”, “jo përdhe”, “2 banjo”", "2+1 me qira, kati 4, jo përdhe, deri 600 €"],
+    ["sparkle", "Dëshira të paqarta", "“Duket bukur”, “i ndritshëm”, “zonë e qetë”, “për familje”", "Dua diçka që duket bukur dhe e qetë, me qira në Tiranë"],
+    ["text", "Fjalë në përshkrim", "Pamje nga deti, oborr, ngrohje, certifikatë pronësie", "Afër detit në Durrës, me pamje nga deti dhe kondicioner"],
+    ["clock", "Data dhe kontakti", "“Postuar sot”, “këtë javë”, një numër telefoni, jo agjenci", "Të rejat e kësaj jave me qira, vetëm nga pronari"],
+    ["chart", "Tregu", "Sa njoftime ka, çmimi mesatar, çmimi për m²", "Sa kushton mesatarisht një 2+1 në shitje në Tiranë?"],
+    ["sort", "Renditje dhe sasi", "Më të lirat, më të mëdhatë, “5 më të lirat për m²”", "5 apartamentet më të lira për m² në shitje"],
+];
+
+// Extra line icons for the AI page (fixed paths, never scraped data)
+const AI_ICONS = {
+    tag: "M3 12V4h8l10 10-8 8zM7.5 7.5h.01",
+    floor: "M4 21V8l8-5 8 5v13M4 13h16M4 17h16M9 21v-4M15 21v-4",
+    sparkle: "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z",
+    text: "M4 6h16M4 10h16M4 14h10M4 18h7",
+    clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+    chart: "M4 20V10M10 20V4M16 20v-7M22 20H2",
+    sort: "M7 4v16M3 16l4 4 4-4M17 20V4M13 8l4-4 4 4",
+    trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
+};
+
+function aiIcon(name) {
+    if (ICONS[name]) return icon(name);
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "icon");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", AI_ICONS[name] || AI_ICONS.sparkle);
+    svg.append(path);
+    return svg;
+}
+
+// Sort options on the results page; changing one re-runs the search for free
+const AI_SORTS = [
+    ["best_match", "Përputhja më e mirë"],
+    ["newest", "Më të rejat"],
+    ["price_asc", "Më të lirat"],
+    ["price_desc", "Më të shtrenjtat"],
+    ["price_per_m2_asc", "Më të lirat për m²"],
+    ["size_desc", "Më të mëdhatë"],
+    ["size_asc", "Më të voglat"],
+    ["rooms_desc", "Më shumë dhoma"],
+];
+
+let listingsReady; // Resolves once the listings are loaded, AI results are drawn from them
+let listingsById = new Map(); // Built once per load in loadListings()
+let aiState = null; // { search, filters, ids, reasons, near, shown }
+let historyItems = []; // The saved searches, newest first
+
+function listingById() {
+    return listingsById;
+}
+
+async function checkAIStatus() {
+    try {
+        const status = await (await fetch("/api/ai/status")).json();
+        $("ai-setup").hidden = status.configured;
+        $("ask-btn").disabled = !status.configured;
+        $("ask-btn").title = status.configured ? "" : "AI nuk është lidhur ende (mungon çelësi i API-së)";
+    } catch {
+        $("ai-setup").hidden = true; // Offline: the status pill already says so
+    }
+}
+
+// Server errors come back as {detail: "..."} in Albanian
+async function errorText(response) {
+    try {
+        const body = await response.json();
+        if (typeof body.detail === "string") return body.detail;
+    } catch { /* not JSON */ }
+    return "Diçka shkoi keq. Provo përsëri.";
+}
+
+async function postJSON(url, body) {
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+        const error = new Error(await errorText(response));
+        error.status = response.status;
+        throw error;
+    }
+    return response.json();
+}
+
+function setLoading(question) {
+    $("ask-btn").disabled = Boolean(question) || !$("ai-setup").hidden;
+    $("ai-loading").hidden = !question;
+    $("ai-loading-question").textContent = question ? `“${question}”` : "";
+}
+
+async function askAI(event) {
+    event?.preventDefault();
+    const question = $("ask-input").value.trim();
+    if (!question) {
+        $("ask-input").focus();
+        return;
+    }
+    $("ai-error").hidden = true;
+    setLoading(question);
+    try {
+        const { search, ...results } = await postJSON("/api/ai/ask", { question });
+        await listingsReady;
+        showAIResults(search, results);
+        $("ask-input").value = "";
+        if (search?.id) location.hash = `#/ai/${search.id}`; // showView sees it's already open and doesn't fetch again
+        loadHistory();
+    } catch (error) {
+        showAIError(error.status ? error.message : "Serveri nuk përgjigjet. Sigurohu që është i ndezur.");
+        if (error.status === 503) checkAIStatus();
+    } finally {
+        setLoading(null);
+    }
+}
+
+function showAIError(message) {
+    $("ai-error").textContent = message;
+    $("ai-error").hidden = false;
+}
+
+// No search open: the capabilities with examples instead of results
+function showWelcome() {
+    aiState = null;
+    $("ai-results").hidden = true;
+    $("ai-welcome").hidden = false;
+    markActiveHistory();
+}
+
+// Open a saved search by id: re-run its filters on today's listings (free, the AI isn't asked again)
+async function openSearch(id) {
+    $("ai-error").hidden = true;
+    try {
+        const response = await fetch(`/api/ai/history/${id}`);
+        if (!response.ok) throw new Error(await errorText(response));
+        const search = await response.json();
+        const results = await postJSON("/api/ai/search", { filters: search.filters });
+        await listingsReady;
+        if (route().searchId !== id) return; // The agent clicked something else meanwhile
+        showAIResults(search, results);
+    } catch (error) {
+        showWelcome();
+        showAIError(error.message || "Kërkimi nuk u hap. Provo përsëri.");
+    }
+}
+
+// Show a search: what was asked, what the AI understood, the numbers, the filter chips and the cards.
+// results: { ids, reasons: {listing id: ["E rinovuar ose e re", ...]}, near: [{id, missed}] }
+function showAIResults(search, results) {
+    aiState = { search, filters: structuredClone(search.filters), shown: AI_PAGE };
+    setResults(results);
+    $("ai-question").textContent = `“${search.question}”`;
+    $("ai-when").textContent = search.created_at ? `Pyetur më ${localTime(search.created_at)}` : "";
+    $("ai-understood").textContent = search.understood || "AI e ktheu pyetjen në filtrat më poshtë.";
+    $("ai-unsupported").textContent = search.not_supported ? `Nuk mund të kërkohet: ${search.not_supported}` : "";
+    $("ai-unsupported").hidden = !search.not_supported;
+    $("ai-cost").textContent = isEmpty(search.cost_usd) ? "" : `Kjo pyetje kushtoi ≈ ${formatCost(search.cost_usd)}`;
+    $("ai-error").hidden = true;
+    $("ai-welcome").hidden = true;
+    $("ai-results").hidden = false;
+    drawAIResults();
+    markActiveHistory();
+    $("ai-results").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function setResults({ ids, reasons, near }) {
+    aiState.ids = ids || [];
+    aiState.reasons = reasons || {};
+    aiState.near = near || [];
+}
+
+// Has the agent changed the AI's filters (removed a chip, changed the sort)?
+function filtersChanged() {
+    return JSON.stringify(aiState.filters) !== JSON.stringify(aiState.search.filters);
+}
+
+function drawAIResults() {
+    const { ids, shown, near } = aiState;
+    const byId = listingById();
+    const listings = ids.map((id) => byId.get(id)).filter(Boolean);
+    const ranked = aiState.filters.sort === "best_match";
+
+    $("ai-count").textContent = listings.length === 1 ? "1 njoftim" : `${formatNumber(listings.length)} njoftime`;
+    $("ai-sort").value = aiState.filters.sort || "newest";
+    $("ai-reset").hidden = !filtersChanged();
+    renderStats(listings);
+    renderAIChips();
+
+    $("ai-cards").replaceChildren(...listings.slice(0, shown).map((l, i) => {
+        const card = withReasons(buildCard(l), aiState.reasons[l.id]);
+        if (ranked && i < 3 && aiState.reasons[l.id]) card.querySelector(".card-photo").append(el("span", "rank-badge", `#${i + 1}`));
+        return card;
+    }));
+    $("ai-none").hidden = listings.length > 0;
+    $("ai-none-hint").textContent = near.length
+        ? "Më poshtë janë njoftimet që i mungon vetëm një kërkesë. Ose hiq një kërkesë më sipër."
+        : "Hiq një nga kërkesat më sipër, ose shkruaje pyetjen ndryshe.";
+    $("ai-more").hidden = listings.length <= shown;
+    $("ai-more").textContent = `Shfaq më shumë (${formatNumber(listings.length - shown)} të tjera)`;
+
+    const nearCards = near.map(({ id, missed }) => {
+        const l = byId.get(id);
+        return l ? withMiss(withReasons(buildCard(l), aiState.reasons[id]), missed) : null;
+    }).filter(Boolean);
+    $("ai-near").hidden = !nearCards.length;
+    $("ai-near-cards").replaceChildren(...nearCards);
+    requestAnimationFrame(() => {
+        markOverflow($("ai-cards"));
+        markOverflow($("ai-near-cards"));
+    });
+}
+
+// ---------- The numbers above the results ----------
+
+function median(values) {
+    const sorted = values.filter((v) => typeof v === "number" && isFinite(v)).sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+// Round to something an agent would say: 1.234 -> 1.230, 123.456 -> 123.000
+function roughly(n) {
+    if (n === null) return null;
+    const step = n >= 100000 ? 1000 : n >= 10000 ? 500 : n >= 1000 ? 10 : 1;
+    return Math.round(n / step) * step;
+}
+
+function statTile(label, value, sub, title) {
+    const tile = el("div", "rs-stat");
+    if (title) tile.title = title;
+    tile.append(el("span", "rs-stat-label", label), el("strong", "rs-stat-value", value ?? "–"));
+    if (sub) tile.append(el("span", "rs-stat-sub", sub));
+    return tile;
+}
+
+// Count, typical price (rent and sale apart, they're different markets), price per m², size, and which sites they came from
+function renderStats(listings) {
+    $("ai-stats").hidden = !listings.length; // Nothing to sum up; the empty-state box says it instead
+    const tiles = [];
+    const sites = Object.entries(listings.reduce((acc, l) => ({ ...acc, [l.site]: (acc[l.site] || 0) + 1 }), {}))
+        .sort((a, b) => b[1] - a[1]);
+    tiles.push(statTile("Njoftime", formatNumber(listings.length),
+        sites.map(([site, n]) => `${SITE_NAMES[site] || site} ${n}`).join(" · ") || null));
+
+    const groups = [["Jepet me qera", "Qiraja tipike"], ["Shitet", "Çmimi tipik (shitje)"]];
+    groups.forEach(([type, label]) => {
+        const prices = listings.filter((l) => l.listing_type === type).map((l) => l._priceEur);
+        const typical = roughly(median(prices));
+        if (typical === null) return;
+        const known = prices.filter((p) => typeof p === "number");
+        tiles.push(statTile(label, `${formatNumber(typical)} €`,
+            `${formatNumber(roughly(Math.min(...known)))} – ${formatNumber(roughly(Math.max(...known)))} €`,
+            `Mediana e ${known.length} njoftimeve me çmim`));
+    });
+
+    // €/m² means the most for sales; fall back to rents when there are no sales
+    const perM2Type = listings.some((l) => l.listing_type === "Shitet" && l._perM2) ? "Shitet" : "Jepet me qera";
+    const perM2 = roughly(median(listings.filter((l) => l.listing_type === perM2Type).map((l) => l._perM2)));
+    if (perM2 !== null) tiles.push(statTile("Për m²", `${formatNumber(perM2)} €/m²`, perM2Type === "Shitet" ? "shitje" : "qira në muaj"));
+
+    const size = median(listings.map((l) => l.size_m2));
+    if (size !== null) tiles.push(statTile("Sipërfaqja tipike", `${formatNumber(Math.round(size))} m²`));
+    $("ai-stats").replaceChildren(...tiles);
+}
+
+// ---------- Filter chips ----------
+
+// Removing a chip or changing the sort re-runs the search on the server without the AI, so it costs nothing
+async function rerunAIFilters() {
+    try {
+        setResults(await postJSON("/api/ai/search", { filters: aiState.filters }));
+        aiState.shown = AI_PAGE;
+        drawAIResults();
+    } catch (error) {
+        showAIError(error.message || "Kërkimi dështoi. Provo përsëri.");
+    }
+}
+
+function formatCost(usd) {
+    return `${usd < 0.001 ? "< 0,001" : String(Math.round(usd * 1000) / 1000).replace(".", ",")} $`;
+}
+
+// "300–600 €", "≥ 50 m²", "≤ 4" in the same style as the dashboard chips
+function rangeLabel(lo, hi, unit = "") {
+    const show = (v) => formatNumber(v);
+    const text = lo !== null && hi !== null ? (lo === hi ? show(lo) : `${show(lo)}–${show(hi)}`)
+        : lo !== null ? `≥ ${show(lo)}` : `≤ ${show(hi)}`;
+    return `${text}${unit ? ` ${unit}` : ""}`;
+}
+
+const POSTED_LABELS = { 0: "Postuar sot", 1: "Postuar dje ose sot", 7: "Postuar këtë javë", 30: "Postuar këtë muaj" };
+
+// One chip per thing the AI searched on; each knows how to remove itself from the filters.
+// Returns { hard: [...], soft: [...] }: requirements filter listings out, wishes only change the order.
+function aiChips(f) {
+    const hard = [];
+    const soft = [];
+    const has = (v) => v !== null && v !== undefined;
+    const list = (field, label) => (f[field] || []).forEach((value) =>
+        hard.push([`${label}: ${value}`, () => (f[field] = f[field].filter((v) => v !== value))]));
+    const range = (lo, hi, label, unit, format = (a, b) => rangeLabel(a, b, unit)) => {
+        if (!has(f[lo]) && !has(f[hi])) return;
+        hard.push([`${label}: ${format(f[lo] ?? null, f[hi] ?? null)}`, () => { f[lo] = null; f[hi] = null; }]);
+    };
+
+    list("listing_types", "Lloji");
+    list("property_types", "Prona");
+    list("places", "Vendi");
+    (f.exclude_places || []).forEach((value) =>
+        hard.push([`Jo në: ${value}`, () => (f.exclude_places = f.exclude_places.filter((v) => v !== value))]));
+    list("conditions", "Gjendja");
+    list("furnishing", "Mobilimi");
+    list("features", "Me");
+    list("posted_by", "Postuar nga");
+    list("sites", "Faqja");
+    range("price_min", "price_max", "Çmimi", f.price_currency === "ALL" ? "Lekë" : "€");
+    range("price_per_m2_min_eur", "price_per_m2_max_eur", "Çmimi për m²", "€/m²");
+    range("size_min", "size_max", "Sipërfaqja", "m²");
+    range("rooms_min", "rooms_max", "Dhoma gjumi", "");
+    range("baths_min", "baths_max", "Banjo", "");
+    range("floor_min", "floor_max", "Kati", "", (lo, hi) => (lo === 0 && hi === 0 ? "Përdhe" : rangeLabel(lo, hi)));
+    if (has(f.posted_within_days)) {
+        hard.push([POSTED_LABELS[f.posted_within_days] || `Postuar në ${f.posted_within_days} ditët e fundit`, () => (f.posted_within_days = null)]);
+    }
+    if (has(f.center_max_km) || (f.center_words || []).length) {
+        const parts = [has(f.center_max_km) ? `≤ ${formatNumber(f.center_max_km)} km` : null,
+            (f.center_words || []).length ? `ose përmend ${f.center_words.slice(0, 3).join(", ")}${f.center_words.length > 3 ? "…" : ""}` : null];
+        hard.push([`Në qendër: ${parts.filter(Boolean).join(" ")}`, () => { f.center_max_km = null; f.center_words = []; }]);
+    }
+    (f.keyword_groups || []).forEach((group, i) => {
+        const words = group.slice(0, 4).join(" / ") + (group.length > 4 ? ` +${group.length - 4}` : "");
+        hard.push([`Përmend: ${words}`, () => (f.keyword_groups = f.keyword_groups.filter((_, n) => n !== i))]);
+    });
+    if ((f.exclude_keywords || []).length) hard.push([`Pa fjalët: ${f.exclude_keywords.join(", ")}`, () => (f.exclude_keywords = [])]);
+    if (has(f.has_photos)) hard.push([f.has_photos ? "Me foto" : "Pa foto", () => (f.has_photos = null)]);
+    if (has(f.has_price)) hard.push([f.has_price ? "Me çmim" : "Pa çmim", () => (f.has_price = null)]);
+    if (f.include_missing) hard.push(["Përfshin njoftimet pa të dhëna", () => (f.include_missing = false)]);
+    if (f.limit) hard.push([`Vetëm ${f.limit} të parat`, () => (f.limit = null)]);
+
+    (f.preferences || []).forEach((pref, i) => {
+        const label = pref.reason_sq || pref.values.slice(0, 3).join(" / ") || pref.kind;
+        soft.push([label, () => (f.preferences = f.preferences.filter((_, n) => n !== i))]);
+    });
+    if (has(f.price_target)) {
+        soft.push([`Afër ${formatNumber(f.price_target)} ${f.price_currency === "ALL" ? "Lekë" : "€"}`, () => (f.price_target = null)]);
+    }
+    if (has(f.size_target)) soft.push([`Afër ${formatNumber(f.size_target)} m²`, () => (f.size_target = null)]);
+    return { hard, soft };
+}
+
+function chipButton([text, remove], className) {
+    const chip = el("button", `fchip ${className}`);
+    chip.type = "button";
+    chip.title = "Hiqe dhe kërko përsëri (falas)";
+    chip.append(el("span", "fchip-text", text), el("span", "fchip-x", "✕"));
+    chip.addEventListener("click", () => {
+        remove();
+        rerunAIFilters();
+    });
+    return chip;
+}
+
+function renderAIChips() {
+    const { hard, soft } = aiChips(aiState.filters);
+    $("ai-chips-hard").replaceChildren(...hard.map((c) => chipButton(c, "chip-hard")));
+    if (!hard.length) $("ai-chips-hard").append(el("span", "muted", "Asnjë: shfaqen të gjitha njoftimet."));
+    $("ai-chips-soft").replaceChildren(...soft.map((c) => chipButton(c, "chip-soft")));
+    $("ai-soft-group").hidden = !soft.length;
+}
+
+// The green "why it matched" line under the title of an AI result card
+function withReasons(card, reasons) {
+    if (!reasons || !reasons.length) return card;
+    const line = el("div", "match-reasons");
+    line.title = "Pse u rendit lart: këto dëshira i plotëson";
+    reasons.forEach((reason) => line.append(el("span", "match-reason", `✓ ${reason}`)));
+    card.querySelector(".card-head").after(line);
+    return card;
+}
+
+// The red "what it lacks" line on a near-miss card
+function withMiss(card, missed) {
+    card.classList.add("card-near");
+    const line = el("div", "miss-reason", `✗ ${missed}`);
+    line.title = "Kjo është e vetmja kërkesë që nuk e plotëson";
+    card.querySelector(".card-head").after(line);
+    return card;
+}
+
+// ---------- Historia (the sidebar) ----------
+
+async function loadHistory() {
+    try {
+        const response = await fetch("/api/ai/history");
+        if (!response.ok) throw new Error();
+        historyItems = await response.json();
+    } catch {
+        $("history-list").replaceChildren(el("p", "side-empty", "Historia nuk u ngarkua. Sigurohu që serveri është i ndezur."));
+        return;
+    }
+    renderHistory();
+}
+
+// "2026-11-06" in Tirana time, to group the history by day
+function tiranaDay(date) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: TIME_ZONE, day: "2-digit", month: "2-digit", year: "numeric" })
+        .formatToParts(date).map((p) => [p.type, p.value]));
+    return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function dayGroup(timestamp) {
+    const day = tiranaDay(parseUtc(timestamp));
+    const today = new Date();
+    if (day === tiranaDay(today)) return "Sot";
+    if (day === tiranaDay(new Date(today - 86400000))) return "Dje";
+    if (day >= tiranaDay(new Date(today - 6 * 86400000))) return "Këtë javë";
+    return "Më herët";
+}
+
+function renderHistory() {
+    const query = norm($("history-filter").value.trim());
+    const shown = historyItems.filter((s) => !query || norm(`${s.question} ${s.understood || ""}`).includes(query));
+    const nodes = [];
+    let lastGroup = null;
+    shown.forEach((s) => {
+        const group = dayGroup(s.created_at);
+        if (group !== lastGroup) nodes.push(el("h3", "side-group", group));
+        lastGroup = group;
+        nodes.push(historyItem(s));
+    });
+    $("history-list").replaceChildren(...nodes);
+    $("history-empty").hidden = historyItems.length > 0;
+    if (historyItems.length && !shown.length) $("history-list").append(el("p", "side-empty", "Asnjë pyetje me këto fjalë."));
+    $("side-count").textContent = historyItems.length ? String(historyItems.length) : "";
+    const total = historyItems.reduce((sum, s) => sum + (s.cost_usd || 0), 0);
+    $("history-total").textContent = historyItems.length
+        ? `${formatNumber(historyItems.length)} pyetje · kosto gjithsej ≈ ${formatCost(total)}`
+        : "";
+    markActiveHistory();
+}
+
+function historyItem(s) {
+    const item = el("div", "side-item");
+    item.dataset.id = s.id;
+    const open = el("a", "side-open");
+    open.href = `#/ai/${s.id}`;
+    open.title = "Hap këtë kërkim te njoftimet e sotme (falas, pa e pyetur AI-n)";
+    const time = localTime(s.created_at)?.split(", ")[1] || "";
+    open.append(
+        el("span", "side-q", s.question),
+        el("span", "side-meta", joinParts(time, `${formatNumber(s.result_count ?? 0)} rezultate`)),
+    );
+    open.addEventListener("click", closeSideOnPhone);
+
+    const remove = el("button", "side-delete");
+    remove.type = "button";
+    remove.title = "Fshi nga historia";
+    remove.setAttribute("aria-label", "Fshi nga historia");
+    remove.append(aiIcon("trash"));
+    remove.addEventListener("click", async () => {
+        if (!confirm("Ta fshij këtë pyetje nga historia?")) return;
+        const response = await fetch(`/api/ai/history/${s.id}`, { method: "DELETE" });
+        if (!response.ok) {
+            alert(await errorText(response));
+            return;
+        }
+        if (aiState?.search?.id === s.id) location.hash = "#/ai";
+        loadHistory();
+    });
+    item.append(open, remove);
+    return item;
+}
+
+function closeSideOnPhone() {
+    document.body.classList.remove("side-open-mobile");
+    $("side-toggle").setAttribute("aria-expanded", "false");
+}
+
+function markActiveHistory() {
+    const id = aiState?.search?.id;
+    document.querySelectorAll(".side-item").forEach((item) => {
+        const active = Number(item.dataset.id) === id;
+        item.classList.toggle("active", active);
+        const link = item.querySelector(".side-open");
+        if (active) link.setAttribute("aria-current", "true");
+        else link.removeAttribute("aria-current");
+    });
+}
+
+function buildCapabilities() {
+    $("ai-capabilities").replaceChildren(...AI_CAPABILITIES.map(([iconName, title, text, example]) => {
+        const card = el("button", "capability");
+        card.type = "button";
+        card.title = "Vendose këtë shembull te pyetja (nuk dërgohet derisa të shtypësh Kërko)";
+        const head = el("span", "capability-head");
+        head.append(el("span", "capability-icon"), el("strong", null, title));
+        head.firstChild.append(aiIcon(iconName));
+        card.append(head, el("span", "capability-text", text), el("span", "capability-example", `“${example}”`));
+        card.addEventListener("click", () => {
+            $("ask-input").value = example;
+            $("ask-input").focus();
+            $("ask-card").scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+        return card;
+    }));
+}
+
 // ---------- Wiring ----------
 
-// Clicking (or Enter/Space on) a cut-off box opens its preview
-$("cards").addEventListener("click", (e) => {
+// Clicking (or Enter/Space on) a cut-off box opens its preview, in every list of cards
+document.addEventListener("click", (e) => {
     const b = e.target.closest(".box.expandable");
     if (b && b.preview) b.preview();
 });
-$("cards").addEventListener("keydown", (e) => {
+document.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
     const b = e.target.closest(".box.expandable");
     if (b && b.preview) {
@@ -1291,6 +1962,7 @@ $("cards").addEventListener("keydown", (e) => {
         b.preview();
     }
 });
+$("load-retry").addEventListener("click", () => (listingsReady = loadListings()));
 
 // Closing the preview: ✕ button, Esc (built into <dialog>) or clicking the dark backdrop
 $("preview-close").addEventListener("click", () => dialog.close());
@@ -1304,7 +1976,10 @@ dialog.addEventListener("close", () => {
 });
 
 const renderSoon = debounce(render, 150);
-$("f-search").addEventListener("input", renderSoon);
+$("f-search").addEventListener("input", () => {
+    filters.search = norm($("f-search").value.trim());
+    renderSoon();
+});
 $("f-sort").addEventListener("change", render);
 $("f-missing").addEventListener("change", () => {
     filters.includeMissing = $("f-missing").checked;
@@ -1312,7 +1987,7 @@ $("f-missing").addEventListener("change", () => {
 });
 $("f-clear").addEventListener("click", clearFilters);
 
-// Phones: the filter panel folds away behind one button
+// The filter panel folds away behind one button
 $("filters-toggle").addEventListener("click", () => {
     const open = $("filters-panel").classList.toggle("open");
     $("filters-toggle").setAttribute("aria-expanded", String(open));
@@ -1338,10 +2013,59 @@ $("cards").addEventListener("scroll", debounce(updateStripNav, 60), { passive: t
 
 $("scrape-btn").addEventListener("click", toggleAuto);
 $("auto-interval").addEventListener("change", changeAutoInterval);
+$("schedule-on").addEventListener("change", saveSchedule);
+$("schedule-time").addEventListener("change", saveSchedule);
 $("pref-agency").addEventListener("change", changePreferences);
 setInterval(updateCountdown, 1000);
 
 $("facets").replaceChildren(...FACETS.map(buildFacet));
 $("ranges").replaceChildren(...RANGES.map(buildRange));
-loadListings();
+// Pyet AI and its history
+$("ask-form").addEventListener("submit", askAI);
+$("ask-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) askAI(e);
+});
+buildCapabilities();
+$("ai-sort").replaceChildren(...AI_SORTS.map(([value, label]) => {
+    const option = el("option", null, label);
+    option.value = value;
+    return option;
+}));
+$("ai-sort").addEventListener("change", () => {
+    aiState.filters.sort = $("ai-sort").value;
+    rerunAIFilters();
+});
+$("ai-reset").addEventListener("click", () => {
+    aiState.filters = structuredClone(aiState.search.filters);
+    rerunAIFilters();
+});
+$("ai-edit").addEventListener("click", () => {
+    $("ask-input").value = aiState.search.question;
+    $("ask-card").scrollIntoView({ behavior: "smooth", block: "start" });
+    $("ask-input").focus({ preventScroll: true });
+});
+$("new-search").addEventListener("click", () => {
+    location.hash = "#/ai";
+    closeSideOnPhone();
+    $("ask-input").focus();
+});
+$("history-filter").addEventListener("input", debounce(renderHistory, 120));
+// Phones: the history folds away behind one button above the question box
+$("side-toggle").addEventListener("click", () => {
+    const open = document.body.classList.toggle("side-open-mobile");
+    $("side-toggle").setAttribute("aria-expanded", String(open));
+});
+$("ai-more").addEventListener("click", () => {
+    aiState.shown += AI_PAGE;
+    drawAIResults();
+});
+window.addEventListener("resize", debounce(() => {
+    markOverflow($("ai-cards"));
+    markOverflow($("ai-near-cards"));
+}, 150));
+window.addEventListener("hashchange", showView);
+
+listingsReady = loadListings();
+loadBlocked();
 checkStatus();
+showView();
