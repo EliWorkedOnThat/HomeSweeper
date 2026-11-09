@@ -322,14 +322,20 @@ def close_browser(browser):
 
 #Function to open a listing the way a person opens several: Ctrl+click (Cmd+click on macOS) its card, so it opens in a new tab.
 #The results tab never navigates, so its cards can't move while we work through them, and there's no "back" to wait for.
-#The site sees a real click on its own card, with the results page as the referrer. Returns the new tab, in front.
+#The site sees a real click on its own card, with the results page as the referrer. Returns the new tab, in front, once the listing loaded.
+#A new tab starts on about:blank, which already counts as loaded, so it waits for the url to change first: without that, anything
+#read straight away (the agency check, the block page check) read an empty page. A tab that fails here is closed before the error goes on.
 def open_listing_tab(page, link):
     with page.context.expect_page(timeout=CLICK_TIMEOUT_MS) as new_tab:
         link.click(modifiers=["ControlOrMeta"], timeout=CLICK_TIMEOUT_MS)
     tab = new_tab.value
-    tab.bring_to_front()
-    tab.wait_for_load_state("domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-    check_blocked(tab)
+    try:
+        tab.bring_to_front()
+        tab.wait_for_url(lambda url: url != "about:blank", wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        check_blocked(tab)
+    except Exception:
+        close_listing_tab(page, tab)
+        raise
     return tab
 
 #Function to close a listing tab and switch back to the results, like a person going back to the list

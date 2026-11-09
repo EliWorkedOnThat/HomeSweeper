@@ -51,11 +51,13 @@ CONDITIONS = ("E re", "Si e re", "Në gjendje të mirë", "E rinovuar", "Në nd�
 FURNISHINGS = ("E mobiluar", "Pjesërisht e mobiluar", "E pamobiluar")
 FEATURES = ("Ashensor", "Parkim / Garazh", "Ballkon / Tarracë")
 
-#First match wins, so the more specific kinds come first (patterns run on norm() text, no accents)
+#The kind named EARLIEST in the text wins: titles say what the property is first and where it is after, so in
+#"Apartament 2+1, Vila L" the "Vila" is a building's name. On a tie (two kinds at the same spot) the order below decides.
+#Patterns run on norm() text (no accents). Place names hide kind words, so match from the start of a word ("kinostudio")
 PROPERTY_PATTERNS = (
     ("Ambient biznesi", re.compile(r"ambient|ambjent|biznes|dyqan|\bzyr[ae]|magazin|\blokal|hapesire|kapanon")),
     ("Tokë", re.compile(r"\btoke\b|\btruall|\bterren")),
-    ("Garsoniere", re.compile(r"garsonier|garsionier|gasonier|studio|papafingo")),
+    ("Garsoniere", re.compile(r"garsonier|garsionier|gasonier|\bstudio|papafingo")),
     ("Vilë / Shtëpi private", re.compile(r"\bvil[ae]\b|pjese vile|shtepi private|shtepi \d+ kat|shtepi me oborr|\d+ katesh")),
     ("Apartament", re.compile(r"apartament|aprtament|apartment|\d\s*\+\s*\d|duplex|dupleks|penthouse|\bpenthause")),
 )
@@ -68,12 +70,14 @@ def norm(text):
     return "".join(c for c in decomposed if unicodedata.category(c) != "Mn").lower()
 
 #Gazeta's and Duashpi's own category comes first (it's structured). MerrJep has none, so its title decides.
+#Every kind found in the text is collected with where it starts, and the earliest one wins (see PROPERTY_PATTERNS)
 def property_type(listing):
     category = norm((listing.get("attributes") or {}).get("Kategoria"))
     for text in (category, norm(listing.get("title"))):
-        for name, pattern in PROPERTY_PATTERNS:
-            if pattern.search(text):
-                return name
+        hits = [(match.start(), name) for name, pattern in PROPERTY_PATTERNS if (match := pattern.search(text))]
+        if hits:
+            #min() keeps the first of equal positions, and hits are in PROPERTY_PATTERNS order, so that order breaks ties
+            return min(hits, key=lambda hit: hit[0])[1]
     return None
 
 #MerrJep says "I ri" / "I përdorur - Si i ri", Gazeta "E re" / "Ne gjendje te mire", Duashpi only has tags
