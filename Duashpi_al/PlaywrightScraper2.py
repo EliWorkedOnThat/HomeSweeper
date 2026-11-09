@@ -320,7 +320,29 @@ def close_browser(browser):
         print(f"[yellow]Could not close the browser cleanly: {escape(describe(error))}[/yellow]")
 #---------- End of the error handling block ----------
 
-#Function to get back to the results page after a listing: the back button first, a fresh load if the cards don't come back
+#Function to open a listing the way a person opens several: Ctrl+click (Cmd+click on macOS) its card, so it opens in a new tab.
+#The results tab never navigates, so its cards can't move while we work through them, and there's no "back" to wait for.
+#The site sees a real click on its own card, with the results page as the referrer. Returns the new tab, in front.
+def open_listing_tab(page, link):
+    with page.context.expect_page(timeout=CLICK_TIMEOUT_MS) as new_tab:
+        link.click(modifiers=["ControlOrMeta"], timeout=CLICK_TIMEOUT_MS)
+    tab = new_tab.value
+    tab.bring_to_front()
+    tab.wait_for_load_state("domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+    check_blocked(tab)
+    return tab
+
+#Function to close a listing tab and switch back to the results, like a person going back to the list
+def close_listing_tab(page, tab):
+    try:
+        tab.close()
+        page.bring_to_front()
+    except PlaywrightError as error:
+        if classify(error) == BROWSER_GONE:
+            raise TurnStop(BROWSER_GONE, describe(error)) from error
+
+#Function to get back to the results page if it ever left it. Listings open in their own tab, so this is only a safety net
+#for a site whose script turns the Ctrl+click into a normal click: the back button first, a fresh load if the cards don't come back
 def return_to_results(page, results_url):
     try:
         page.go_back(wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
@@ -375,12 +397,9 @@ def process_listing_containers(page, skip_agencies=False):
             print("[yellow]Paused, ending this turn early with what we have.[/yellow]")
             break
 
-        #New posts arrive every minute and push the older cards down, so while we work through a page its last cards move to the
-        #next page. A card that's gone is left unmarked (not failed): the next page picks it up, instead of waiting for a click that can't happen
+        #New posts push older cards onto the next page every minute, but the results tab never navigates (listings open in
+        #their own tab), so every card read above is still on it. A card that moved on the site shows up again on the next page as seen
         card = page.locator(f'{LISTING_SELECTOR}[href*="/prona/{upid}/"]').first
-        if not card.count():
-            print(f"[yellow]{upid} moved to the next page (newer posts pushed it down), it will be picked up there.[/yellow]")
-            continue
 
         if opened:
             rest(page, "next listing") #Every listing is a page load, so rest between them to avoid getting flagged
@@ -388,20 +407,20 @@ def process_listing_containers(page, skip_agencies=False):
 
         print(f"[cyan]Processing {i + 1}/{len(new_ids)}: {upid}[/cyan]")
 
+        tab = None
         try:
-            #Scroll down to the card and pause on it like a person reading the list, then open it
+            #Scroll down to the card and pause on it like a person reading the list, then open it in a new tab
             scan_card(page, upid)
-            card.click(timeout=CLICK_TIMEOUT_MS)
-            page.wait_for_url(f"**/prona/{upid}/**", timeout=15000)
+            tab = open_listing_tab(page, card)
 
             #The agency markers are only on the listing page, so agency listings cost one page load (only once, they are remembered)
-            if skip_agencies and is_agency(page, read_json_ld(page)[1]):
+            if skip_agencies and is_agency(tab, read_json_ld(tab)[1]):
                 print(f"[yellow]Skipping agency listing: {upid}[/yellow]")
                 PROCESSED_UPIDS.add(upid)
                 AGENCY_UPIDS.add(upid)
                 listing_ok()
             else:
-                data = pull_data_from_listing(page, upid)
+                data = pull_data_from_listing(tab, upid)
                 SCRAPED_LISTINGS.append(data)
                 PROCESSED_UPIDS.add(upid)
                 listing_ok()
@@ -415,7 +434,10 @@ def process_listing_containers(page, skip_agencies=False):
         except TurnStop:
             raise
         except Exception as error:
-            listing_failed(page, upid, error) #Raises TurnStop when the turn should end
+            listing_failed(tab or page, upid, error) #Raises TurnStop when the turn should end
+        finally:
+            if tab is not None:
+                close_listing_tab(page, tab)
 
         if page.url != results_url:
             return_to_results(page, results_url)

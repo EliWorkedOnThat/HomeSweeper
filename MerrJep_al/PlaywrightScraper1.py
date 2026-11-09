@@ -3,6 +3,7 @@ from playwright.sync_api import sync_playwright, Error as PlaywrightError, Timeo
 from rich import print
 from rich.markup import escape
 import json
+import random
 import re
 import time
 import traceback
@@ -11,7 +12,9 @@ from Scraper.config import Demo_Environment, Rest_Time, Headless, Listings_Per_T
 #Global Variables
 BASE_URL = "https://www.merrjep.al/njoftime/imobiliare-vendbanime/ne-shitje-kerkoj-te-blej-me-qera-kerkohet-me-qera-nderrohet"
 CARD_SELECTOR = "div.row.row-listing[data-product-id]" #A results card, data-product-id is the UPID
+LINK_SELECTOR = "h2 a.Link_vis" #The listing's link inside a card, Ctrl+clicked to open it in a new tab
 CLICK_TIMEOUT_MS = 10000 #A card that is there but can't be clicked fails after 10 s instead of Playwright's 30 s
+SCAN_TIME = (1.0, 2.5) #Random seconds spent "reading" each card before opening it, so the visit looks human
 DEMO_LISTING_LIMIT = 5 #How many listings to scrape per turn when Demo_Environment is True
 PROCESSED_UPIDS = set() #Everything this turn skips: already in the DB, scraped this turn, or remembered below
 SCRAPED_LISTINGS = []
@@ -286,7 +289,50 @@ def close_browser(browser):
         print(f"[yellow]Could not close the browser cleanly: {escape(describe(error))}[/yellow]")
 #---------- End of the error handling block ----------
 
-#Function to get back to the results page after a listing: the back button first, a fresh load if the cards don't come back
+#Function to open a listing the way a person opens several: Ctrl+click (Cmd+click on macOS) its card, so it opens in a new tab.
+#The results tab never navigates, so its cards can't move while we work through them, and there's no "back" to wait for.
+#The site sees a real click on its own card, with the results page as the referrer. Returns the new tab, in front.
+def open_listing_tab(page, link):
+    with page.context.expect_page(timeout=CLICK_TIMEOUT_MS) as new_tab:
+        link.click(modifiers=["ControlOrMeta"], timeout=CLICK_TIMEOUT_MS)
+    tab = new_tab.value
+    tab.bring_to_front()
+    tab.wait_for_load_state("domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+    check_blocked(tab)
+    return tab
+
+#Function to close a listing tab and switch back to the results, like a person going back to the list
+def close_listing_tab(page, tab):
+    try:
+        tab.close()
+        page.bring_to_front()
+    except PlaywrightError as error:
+        if classify(error) == BROWSER_GONE:
+            raise TurnStop(BROWSER_GONE, describe(error)) from error
+
+#Helper function to scroll the card into view with real mouse-wheel steps, then wait a random SCAN_TIME on it
+#Done right before opening the listing, so the visit looks like a person scrolling the list (the same idea as Gazeta and Duashpi)
+def scan_card(page, upid):
+    box = None
+    try:
+        box = page.locator(f'{CARD_SELECTOR}[data-product-id="{upid}"]').first.bounding_box(timeout=2000)
+    except PlaywrightTimeoutError:
+        box = None #Card not found, just scroll a bit instead
+
+    viewport_height = (page.viewport_size or {}).get("height", 720)
+    distance = box["y"] - viewport_height * random.uniform(0.2, 0.4) if box else random.randint(200, 400)
+
+    #Wheel in small uneven steps instead of one jump, like a mouse wheel or trackpad
+    while distance > 0:
+        step = min(distance, random.randint(80, 160))
+        page.mouse.wheel(0, step)
+        page.wait_for_timeout(random.randint(30, 90))
+        distance -= step
+
+    page.wait_for_timeout(random.uniform(*SCAN_TIME) * 1000)
+
+#Function to get back to the results page if it ever left it. Listings open in their own tab, so this is only a safety net
+#for a site whose script turns the Ctrl+click into a normal click: the back button first, a fresh load if the cards don't come back
 def return_to_results(page, results_url):
     try:
         page.go_back(wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
@@ -336,17 +382,13 @@ def process_listing_containers(page, skip_agencies=False):
             print("[yellow]Paused, ending this turn early with what we have.[/yellow]")
             break
 
-        #New posts push the older cards down while we work, so a card can move to the next page. One that's gone isn't a
-        #failure: it's left unmarked and picked up on the next page, instead of waiting for a click that can't happen
+        #The results tab never navigates (listings open in their own tab), so every card read above is still on it
         listing = page.locator(f'{CARD_SELECTOR}[data-product-id="{upid}"]')
-        if not listing.count():
-            print(f"[yellow]{upid} moved to the next page (newer posts pushed it down), it will be picked up there.[/yellow]")
-            continue
-
         print(f"[cyan]Processing {i + 1}/{len(new_ids)}: {upid}[/cyan]")
 
+        tab = None
         try:
-            #Agency check happens on the results card, before clicking, so a skipped listing costs no page load or rest
+            #Agency check happens on the results card, before opening it, so a skipped listing costs no page load or rest
             if skip_agencies and listing.locator(AGENCY_SELECTOR).count():
                 print(f"[yellow]Skipping agency listing: {upid}[/yellow]")
                 PROCESSED_UPIDS.add(upid)
@@ -354,10 +396,10 @@ def process_listing_containers(page, skip_agencies=False):
                 listing_ok()
                 continue
 
-            listing.locator("h2 a.Link_vis").first.click(timeout=CLICK_TIMEOUT_MS)
-            page.wait_for_url("**/njoftim/**", timeout=15000)
-
-            data = pull_data_from_listing(page, upid)
+            #Scroll down to the card and pause on it like a person reading the list, then open it in a new tab
+            scan_card(page, upid)
+            tab = open_listing_tab(page, listing.locator(LINK_SELECTOR).first)
+            data = pull_data_from_listing(tab, upid)
             SCRAPED_LISTINGS.append(data)
             PROCESSED_UPIDS.add(upid)
             listing_ok()
@@ -373,7 +415,10 @@ def process_listing_containers(page, skip_agencies=False):
         except TurnStop:
             raise
         except Exception as error:
-            listing_failed(page, upid, error) #Raises TurnStop when the turn should end
+            listing_failed(tab or page, upid, error) #Raises TurnStop when the turn should end
+        finally:
+            if tab is not None:
+                close_listing_tab(page, tab)
 
         if page.url != results_url:
             return_to_results(page, results_url)

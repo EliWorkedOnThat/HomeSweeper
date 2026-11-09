@@ -31,7 +31,7 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 
 ### MerrJep.al scraper (working, v1)
 - Page URLs come from `page_url(n)`: `BASE_URL` for page 1, then `BASE_URL?Page=N`. It runs in [turns](#turn-based-scraping-all-sites) and stops when a page has no listing cards.
-- On each results page it collects unique `data-product-id` values (UPIDs), drops the ones already seen, then opens each new listing, scrapes it and goes back.
+- On each results page it collects unique `data-product-id` values (UPIDs) and drops the ones already seen. For each new listing it scrolls to the card and pauses on it (`scan_card()`, 1–2.5 s, added 2026-11-09 against detection), then opens it in a new tab (see [Listings open in a new tab](#listings-open-in-a-new-tab-merrjep-and-duashpi)), scrapes it and closes the tab.
 - On each listing page it pulls:
   - JSON-LD `Product` data: title, price, currency, description and images. If a listing has no JSON-LD, it is skipped.
   - HTML tag attributes (`.tags-area`), stored as a dict.
@@ -58,11 +58,11 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 - Plain HTTP also returns `__NEXT_DATA__` (tested with `FetchHTML --fast`), so `Request.py` with HTTPX could replace Playwright for this site later. **Not yet:** a bare HTTP client is easy for the site to spot (no JS, no scrolling, no browser fingerprint), so for now we stay with Playwright.
 
 ### Duashpi.al scraper (working, v1)
-- Works like MerrJep: results cards are short, so each **new** listing is opened (scroll to the card with `scan_card()`, click, read, `return_to_results()`), resting `Rest_Time` + up to 2 s between listings and between pages. Results: `https://duashpi.al/kerko-prona?sort=new&page=N`; the last page is the highest `a[data-page]` (4651 on 2026-11-04).
+- Works like MerrJep: results cards are short, so each **new** listing is opened (scroll to the card with `scan_card()`, Ctrl+click it into a new tab, read, close the tab; see [Listings open in a new tab](#listings-open-in-a-new-tab-merrjep-and-duashpi)), resting `Rest_Time` + up to 2 s between listings and between pages. Results: `https://duashpi.al/kerko-prona?sort=new&page=N`; the last page is the highest `a[data-page]` (4651 on 2026-11-04).
 - **Cookie popup:** a "Cookies dhe privatësia" banner with a full-page `#backdrop` blocks every click. `accept_cookies()` clicks `#acceptAllButton` ("Prano dhe Mbyll") once per turn, after a short pause. If clicks start timing out with "intercepts pointer events", check this first.
 - **Premium cards are ignored.** A page has ~30 normal cards (newest first) and ~78 premium cards mixed in between, not in date order and repeated across pages (`href` ends in `?pt=N`). `LISTING_SELECTOR` (`a.property-item-list-v2:not(:has(.premium-badge))`) keeps only the normal ones. Premium listings also show up as normal cards, so nothing is lost.
 - UPID = the hex id in the url (`/prona/<upid>/<slug>.html`), checked against the opened page's url.
-- **Cards move while we work.** New posts arrive every minute, so during the ~5 min it takes to open a page's 30 listings, the last cards get pushed onto the next page. Before each click the scraper checks the card is still there; if not, it is left unmarked (not failed) and gets picked up on the next page. Without this check every moved card waited out a 30 s click timeout and was wrongly added to `FAILED_UPIDS`. Clicks use `CLICK_TIMEOUT_MS` (10 s).
+- **Cards move while we work.** New posts arrive every minute, so during the ~5 min it takes to open a page's 30 listings, the last cards get pushed onto the next page on the site. This no longer matters: listings open in their own tab, so our results tab never reloads and every card we read stays on it. (Before 2026-11-09 the scraper clicked and went back, the page came back shifted, and every moved card waited out a click timeout.)
 - Listing page: JSON-LD `Product` gives the description (title comes from the `h1`, which has no emoji). The seller is a second JSON-LD block, `LocalBusiness` (category "Real Estate Agency") for agency accounts, `RealEstateAgent` for everyone else; its `name` → `seller`, its `telephone` + the "Telefono …" button → `phone` via `combine_phones()`.
 - **Price comes from the page, not the JSON-LD**: the JSON-LD converts LEK to EUR (40,000 LEK → 440 EUR). `parse_price()` reads `500 € / në muaj` / `12,000,000 LEK` → `EUR`/`ALL`; "Cmimi sipas kerkeses." → `None`.
 - Date: the relative badge ("8 orë më parë") has the exact time in its `title` (`04/11/2026 12:34`), saved as `published_date`/`published_time` in Gazeta's format. The badge before it is the type: `Me qera` → `Jepet me qera`, `Për shitje` → `Shitet`.
@@ -102,12 +102,20 @@ Added 2026-11-09. **Whatever goes wrong, a turn hands back the listings it alrea
 
 - **Page loads** go through `open_page()`: `PAGE_ATTEMPTS = 2` tries of `PAGE_TIMEOUT_MS = 20 s` each, `RETRY_WAIT_SECONDS = 10` apart, so a dead page costs at most ~50 s. It checks the HTTP status, which was ignored before. The 10 s wait is cut into 0.5 s steps that check `should_stop`, so pause still works during it.
 - **"Empty" vs "didn't load":** a results page that loads but shows no listings raises `NoListings`. Every turn starts at page 1, which always has listings, so an empty page 1 means the markup changed (turn ends as `markup`). An empty later page is past the last page, and `RESUME_PAGE` is clamped as before. A page that **didn't load** never touches `RESUME_PAGE`, so the backfill position isn't lost (it used to be clamped on any timeout).
-- **Going back** after a listing uses `return_to_results()` (MerrJep and Duashpi): the back button first, then a fresh `open_page()` of the results page if the cards don't come back.
+- **Listing tabs** (MerrJep and Duashpi) are always closed in a `finally`, even when the listing failed. `return_to_results()` (back button, then a fresh `open_page()`) is only a safety net now, for a results tab that navigated anyway.
 - **`MAX_FAILS_IN_A_ROW = 3`:** three listings failing back to back mean the site changed or is blocking us, so the turn ends instead of burning through 50 failures. Any success (`listing_ok()`) resets the streak.
-- **Cards that moved** to the next page are skipped without counting as a failure on MerrJep too now (Duashpi already did this), and MerrJep clicks use `CLICK_TIMEOUT_MS` (10 s) instead of Playwright's 30 s.
+- Clicks use `CLICK_TIMEOUT_MS` (10 s) instead of Playwright's 30 s on every site.
 - **How the turn ended** is kept in each scraper's `LAST_TURN` (`{"ended": "ok"|"paused"|<kind>, "reason": ...}`) and logged in red when it's an error. It isn't shown in the UI yet (to-do: make scraper failures visible).
 - `KeyboardInterrupt` is never caught (only `Exception`), so Ctrl+C and quitting still work. Closing the browser is guarded (`close_browser()`), so an error while closing can't hide the result. Scraped text printed through `rich` is `escape()`d: a title like "[/b] SHITET" raised a markup error and wrongly failed a listing that had scraped fine.
 - **Tested 2026-11-09** with faults injected through `page.route` and wrapped functions (11 scenarios, all passing): page 2 timing out twice (page 1's 20 listings saved, `RESUME_PAGE` kept), a 503 once (retried, recovered), 429 (blocked in 0.9 s), a Cloudflare page, a page without `__NEXT_DATA__`, pause during the retry wait (stopped in 2.5 s), 3 bugs in a row, an empty MerrJep page 1, a bug on one MerrJep listing, a Duashpi listing page failing once, and the browser closing mid-turn.
+
+### Listings open in a new tab (MerrJep and Duashpi)
+Added 2026-11-09. For each new listing, the scraper scrolls to its card and pauses (`scan_card()`), then **Ctrl+clicks** the card (`modifiers=["ControlOrMeta"]`, so Cmd on macOS) with `open_listing_tab()`. The listing opens in a new tab, is read there, and the tab is closed with `close_listing_tab()`.
+- **Why:** the old flow clicked the card and pressed back. While we worked, new posts pushed the cards down, and coming back to a shifted page made cards disappear onto the next page (a click timeout each). Now the results tab never navigates, so every card we read stays on it, and there is no back step to fail.
+- **Detection:** the site sees a real click on its own card, the same mouse events a person makes, and the listing page gets the results page as its `document.referrer` (checked on both sites). Opening listings in new tabs is normal behaviour. The scroll-and-pause is kept on purpose to avoid captchas, and MerrJep got it too.
+- **Speed** (3 listings per site, 2026-11-09): MerrJep 6.9 → 8.6 s per listing, the extra time is the new scroll-and-pause. Duashpi 8.5 → 8.2 s. Going back was cheaper than expected because Chromium restores the results page from its cache, so the tab doesn't save time; it removes the moved-card and go-back failures.
+- If a site's script ever turns the Ctrl+click into a normal navigation, `expect_page()` times out (a `temporary` failure) and `return_to_results()` brings the results tab back. Probe it with one Ctrl+click on a card if a site redesigns.
+- Tested 2026-11-09: a 3-listing turn on each site (results tab never navigated, at most 2 tabs open, no empty fields), a Duashpi listing tab failing to load once (retried next turn, turn filled up), the browser dying during the 2nd listing (both scraped listings kept), and a bug on one MerrJep listing (tab closed, turn filled up).
 
 ### Config (`Scraper/config.py`)
 - `Demo_Environment = True` limits each turn to `DEMO_LISTING_LIMIT` (5) new listings per site, which is set in each scraper. Set it to `False` for real turns of `Listings_Per_Turn`.
@@ -211,8 +219,37 @@ Agents type a question in Albanian (or English) on the **Pyet AI** tab. The resu
 - Rows are added with `append_row()`, which turns any cell openpyxl made a formula (text starting with `=`) back into plain text. Sellers write their own titles and descriptions, so `=HYPERLINK(...)` would otherwise become a working link in the agent's Excel. The text is kept exactly as written (no `'` prefix, which would show up in phone numbers like `+355…`). We never write real formulas. Fixed 2026-11-04.
 - The Engine wraps the per-turn Excel save in `try`/`except`, so an Excel problem (bad character, renamed sheet, damaged file) is logged and never stops a turn. The data is already in the DB by then.
 
+## Recent changes
+**2026-11-09** (on `dev`, after merging Alex's `dev-1`):
+- **Merged Alex's three commits** (dashboard filters and redesign, same-size cards with pagination, and Pyet AI with blocked sellers, the daily start, server hardening and `REVIEW.md`). After pulling them, run `py -3.14 -m pip install anthropic`: the server doesn't start without it, even if the AI isn't used (bug B6 below).
+- **Full review and end-to-end test** of the merged app: scraping, pause, the dashboard, blocking, the export, the security checks and the AI endpoints without a key. Everything passed; the bugs found are the list below.
+- **Scraper error handling** (commit `3b7d104`): a turn never loses what it collected, errors are sorted into five kinds with one response each, page loads get 2 tries of 20 s, 10 s apart, and 3 failures in a row end the turn. See [Scraper error handling](#scraper-error-handling-all-sites). Fixes B1, plus Alex's S1, S2 and part of S3.
+- **Listings open in a new tab** on MerrJep and Duashpi (Ctrl+click after the scroll-and-pause), so the results page never moves under us. MerrJep got the scroll-and-pause too. See [Listings open in a new tab](#listings-open-in-a-new-tab-merrjep-and-duashpi). Fixes B7 and Alex's S8.
+- Scraped titles printed through `rich` are escaped in the scrapers (a title like "[/b] SHITET" failed a listing that had scraped fine).
+
+## Bug list (review of 2026-11-09, most important first)
+Work through these in order. Mark each one done here (with the date) when it's fixed.
+
+| # | Bug | Status | Where |
+|---|---|---|---|
+| B1 | A page-load timeout threw away a site's whole turn | **Done 2026-11-09** | scrapers |
+| B2 | **MerrJep `posted_by` is "Kompani" on every listing.** If private sellers are marked "Kompani" too, then "Jo agjenci" (dashboard and AI) drops all of MerrJep, and blocking a private MerrJep seller blocks everyone with that name on every site (`Derive.block_rule_of` matches companies by name). **Check first:** the value comes straight from MerrJep's own "Njoftim nga" tag, and every MerrJep seller seen so far really is an agency (ARKA HOME, Vero Home Real Estate, Century 21…). Find a MerrJep listing without the `span.isstore` agency badge and see what its "Njoftim nga" says. | **Next** | MerrJep scraper, `Derive.py` |
+| B3 | **Property type from place names.** A title with "studio" or "vila" beats "apartament" / "2+1": "APARTAMENT 1+1 … KINOSTUDIO" becomes Garsoniere, "2+1 … PRANE VILA GOLD" becomes Vilë. The AI never relaxes the property type, so it silently drops these. | Open | `Derive.py` |
+| B4 | **Excel export misses columns:** no city, type, m², rooms, condition, posted by, address or first seen (Gazeta and Duashpi have no city or type at all), and the headers are English. | Open | `Output.py` |
+| B5 | **The $2 daily AI cap can be bypassed:** deleting today's questions from Historia resets it, and paid questions that failed (refusal, `max_tokens`, unreadable answer) are never counted. | Open | `DB.py`, `Server.py`, `AI.py` |
+| B6 | **The server doesn't start without `anthropic` installed**, even when the AI isn't used. Import it only when a question is asked. | Open | `Server.py`, `AI.py` |
+| B7 | MerrJep waited 30 s on a card that moved to the next page, then skipped it until a restart | **Done 2026-11-09** | scrapers |
+| B8 | **Scraper failures are invisible:** the turn's "failed" count only counts DB save errors. Each scraper's `LAST_TURN` now says how its turn ended, so the Engine and the UI can show it. | Open | `Engine.py`, `UI/app.js` |
+| B9 | The AI cost is always priced at Opus 5.5 rates, even when a fallback model answered (it feeds the cap). | Open | `AI.py` |
+| B10 | MerrJep keeps the same phone twice (`+355 69…; 069…`): its `combine_phones()` compares all digits, the other scrapers compare the last 9. | Open | MerrJep scraper |
+| B11 | Duashpi reads "1.5 milion €" as 1.5 €. | Open | Duashpi scraper |
+| B12 | "Mbledhja e fundit" shows a time with no date. | Open | `UI/app.js` |
+| B13 | Docs drift: `CLAUDE.md` lists `Request*.py` files that don't exist, `REVIEW.md` says the work is uncommitted, and the AI key path is built outside the planned `Paths.py`. | Open | docs, `AI.py` |
+
+**Decisions for the owner** (not bugs): Pyet AI sends questions to Anthropic and needs an API key per install, which contradicts "nothing phones home" and "no licence keys" in `CLAUDE.md` → Product architecture; decide and update that section. The scraper helpers are copied three times, which is how B10 happened (Alex's S6 suggests a shared module). MerrJep's new scroll-and-pause costs ~1.7 s per listing (~85 s per 50-listing turn); it was kept to avoid captchas.
+
 ## To do next (prioritized, 2026-11-04)
-The phases below hold the long-term plan. This is the short list of what to pick up next, most important first.
+The phases below hold the long-term plan. This is the short list of what to pick up next, most important first. The [Bug list](#bug-list-review-of-2026-11-09-most-important-first) above comes first.
 
 **Before agents use it for real**
 1. **Set `Headless = True` and `Demo_Environment = False`** in `config.py` and do a long real run, for an hour or more, with play on and a 1–5 min break. Watch for blocks or captchas, slow turns, and listings that fail. The longest run so far is one full Duashpi turn (50 listings, 6 min, no problems); MerrJep and Gazeta have only had demo turns. A full turn of all three sites will take roughly 15 min, because MerrJep and Duashpi open every listing.
