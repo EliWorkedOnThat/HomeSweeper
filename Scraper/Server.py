@@ -27,6 +27,7 @@ from Scraper.Derive import block_rule_of, blocked_rules, is_blocked, with_derive
 from Scraper.Engine import main as run_engine
 from Scraper.Output import build_workbook
 from Scraper.Search import Filters, known_areas, match_reasons, near_misses, search
+from Scraper.Version import get_version_and_updates
 
 #Global Variables
 HOST = "127.0.0.1" #Only this PC can reach the server, other devices on the network can't
@@ -192,7 +193,9 @@ def apply_schedule(enabled, time_of_day, interval_minutes):
 #Function to load the daily start saved in SETTINGS_FILE. A missing or damaged file just means no daily start.
 def load_schedule():
     try:
-        saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))["schedule"]
+        saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8")).get("schedule")
+        if saved is None:
+            return #Never set (the file may only hold the version)
         if TIME_OF_DAY.fullmatch(saved["time"]) and saved["interval_minutes"] in AUTO_INTERVALS:
             apply_schedule(bool(saved["enabled"]), saved["time"], saved["interval_minutes"])
     except FileNotFoundError:
@@ -200,12 +203,29 @@ def load_schedule():
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"[yellow]Could not read {SETTINGS_FILE.name}, the daily start stays off: {error!r}[/yellow]")
 
-#Function to save the daily start. Written to a temporary file first, so a crash can't leave half a settings file.
-def save_schedule(enabled, time_of_day, interval_minutes):
+#Function to write SETTINGS_FILE: keeps what's already saved, applies the changes and stamps the running version (as info, so
+#the file shows which version last wrote it). Written to a temporary file first, so a crash can't leave half a settings file.
+def save_settings(**changes):
+    try:
+        settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(settings, dict):
+            settings = {}
+    except (OSError, ValueError):
+        settings = {} #Missing or damaged: start again (load_schedule() already ignored a damaged file)
+    settings.update(changes, version=check_version())
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     temporary = SETTINGS_FILE.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"schedule": {"enabled": enabled, "time": time_of_day, "interval_minutes": interval_minutes}}), encoding="utf-8")
+    temporary.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     os.replace(temporary, SETTINGS_FILE)
+
+#Function to save the daily start
+def save_schedule(enabled, time_of_day, interval_minutes):
+    save_settings(schedule={"enabled": enabled, "time": time_of_day, "interval_minutes": interval_minutes})
+
+#Function to get version of tool and check for updates later on
+def check_version():
+    version = get_version_and_updates()
+    return version
 
 #Function the auto thread runs for the whole life of the server: sleeps until the next run is due, then starts it
 def auto_loop():
@@ -247,6 +267,11 @@ async def lifespan(app):
         create_tables(connection)
         connection.close()
     load_schedule()
+    try:
+        save_settings() #Stamp the running version, so after an update the file shows the new one
+    except OSError as error:
+        print(f"[yellow]Could not write the version to {SETTINGS_FILE.name}: {error!r}[/yellow]")
+    print(f"[green]HomeSweeper version {check_version()}[/green]")
     threading.Thread(target=auto_loop, daemon=True, name="auto-scrape").start()
     yield
     with STATE_LOCK:

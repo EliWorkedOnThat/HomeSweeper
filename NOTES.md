@@ -222,6 +222,12 @@ Agents type a question in Albanian (or English) on the **Pyet AI** tab. The resu
 - Rows are added with `append_row()`, which turns any cell openpyxl made a formula (text starting with `=`) back into plain text. Sellers write their own titles and descriptions, so `=HYPERLINK(...)` would otherwise become a working link in the agent's Excel. The text is kept exactly as written (no `'` prefix, which would show up in phone numbers like `+355…`). We never write real formulas. Fixed 2026-11-04.
 - The Engine wraps the per-turn Excel save in `try`/`except`, so an Excel problem (bad character, renamed sheet, damaged file) is logged and never stops a turn. The data is already in the DB by then.
 
+### Versioning (`Scraper/Version.py`)
+Started 2026-11-09, structure only (the update check isn't built yet).
+- `Scraper/Version.py` holds `__version__` and `get_version_and_updates()`; `Server.check_version()` calls it. Bump the version there for a release.
+- **`Data/settings.json` carries the version as info:** `Server.save_settings()` stamps `"version"` every time it writes the file, and once at startup, so the file shows which version last ran. Saving keeps whatever else is in the file (today the daily start under `"schedule"`); a missing or damaged file is started again. `load_schedule()` treats a file without `"schedule"` as "no daily start". The version is never read back from the file: the code is the source.
+- **Before the updater is built:** the version is `"1.0.0/11/2026"`, but the updater must compare versions with `packaging.version.Version` (see `CLAUDE.md` → Versioning and release flow), which rejects that format. Switch to plain `X.Y.Z` (`"1.0.0"`) and keep the release date in the manifest's `released` field.
+
 ## Recent changes
 **2026-11-09** (on `dev`, after merging Alex's `dev-1`):
 - **Merged Alex's three commits** (dashboard filters and redesign, same-size cards with pagination, and Pyet AI with blocked sellers, the daily start, server hardening and `REVIEW.md`). After pulling them, run `py -3.14 -m pip install anthropic`: the server doesn't start without it, even if the AI isn't used (bug B6 below).
@@ -231,6 +237,7 @@ Agents type a question in Albanian (or English) on the **Pyet AI** tab. The resu
 - Scraped titles printed through `rich` are escaped in the scrapers (a title like "[/b] SHITET" failed a listing that had scraped fine).
 - **Bug hunt after the new-tab and Excel commits:** fixed B14 (Duashpi's agency skip read a blank tab); B15 and B16 added to the bug list.
 - **Fixed B3, property type from place names:** `Derive.property_type()` now picks the kind named earliest in the text instead of the first pattern in list order, and "studio" must start a word. Nothing is stored, so every saved listing is corrected after a server restart.
+- **Versioning started:** `Scraper/Version.py`, and the version is written to `Data/settings.json` as info (see [Versioning](#versioning-scraperversionpy)).
 
 ## Bug list (review of 2026-11-09, most important first)
 Work through these in order. Mark each one done here (with the date) when it's fixed.
