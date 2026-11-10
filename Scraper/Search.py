@@ -13,7 +13,7 @@ from Scraper.Derive import CONDITIONS, EUR_TO_ALL, FEATURES, FURNISHINGS, PROPER
 #Global Variables
 LISTING_TYPES = ("Shitet", "Jepet me qera")
 POSTED_BY = ("Kompani", "Person privat")
-SITES = ("merrjep", "gazetacelesi", "duashpi")
+SITES = ("merrjep", "gazetacelesi", "duashpi", "njoftime")
 #"best_match" ranks by the soft preferences and targets below; the others sort on one value
 SORTS = ("best_match", "newest", "price_asc", "price_desc", "price_per_m2_asc", "size_desc", "size_asc", "rooms_desc")
 PREFERENCE_KINDS = ("keywords", "condition", "feature", "furnishing", "many_photos", "near_center", "range")

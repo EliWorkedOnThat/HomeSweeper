@@ -1,6 +1,6 @@
 ﻿# HomeSweeper project notes
 
-_Last updated: 2026-11-09_
+_Last updated: 2026-11-10_
 
 ## Purpose
 HomeSweeper is an early-stage collection of real-estate listing scrapers. Each target site has its own folder for its site-specific scraper code (Playwright browser scraper + direct HTTP request scraper). Shared coordination, configuration, database and output logic lives in `Scraper/`.
@@ -17,7 +17,9 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
 - `Duashpi_al/` — Duashpi.al scrapers (underscore, not hyphen, so it imports as a Python package).
   - `PlaywrightScraper2.py` — the working scraper. Exposes `scrape_duashpi_al(skip_agencies=False, known_upids=(), should_stop=None)`, which runs one turn and returns a list of listing dicts. See [Duashpi scraper](#duashpial-scraper-working-v1).
   - `Request2.py` — empty placeholder.
-- `Scraper/Engine.py` — orchestrator. Runs every site in `SCRAPERS` one after another (MerrJep, then Gazeta Celesi, then Duashpi) and saves each site's results with its own site key. A crash in one site is logged and the next site still runs. Returns `{found, saved, failed, sites: {site: {...}}}`.
+- `njoftime_al/` — njoftime.com scraper.
+  - `PlaywrightScraper3.py` — the working scraper. Exposes `scrape_njoftime(skip_agencies=False, known_upids=(), should_stop=None)`, which runs one turn over five forums and returns a list of listing dicts. See [Njoftime scraper](#njoftimecom-scraper-working-v1).
+- `Scraper/Engine.py` — orchestrator. Runs every site in `SCRAPERS` one after another (MerrJep, then Gazeta Celesi, then Duashpi, then Njoftime) and saves each site's results with its own site key. A crash in one site is logged and the next site still runs. Returns `{found, saved, failed, sites: {site: {...}}}`.
 - `Scraper/DB.py` — the only file that talks to the database (SQLite). See [Database](#database-scraperdbpy).
 - `Scraper/Output.py` — writes listings to `Output/listings.xlsx` (openpyxl).
 - `Scraper/config.py` — global settings shared by every scraper.
@@ -77,6 +79,19 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
   - Price was missing on only 1 of 50: "Çmimi: Për informacion, kontaktoni!", which is correct. Currencies were 30 `ALL` and 19 `EUR`.
   - `posted_by` was 36 `Kompani` and 14 empty.
 - **Not tested yet:** "Jo Listime Agjensie" on Duashpi, a full Engine turn with all three sites saving to the DB, and headless mode on this site.
+
+### Njoftime.com scraper (working, v1)
+Added 2026-11-10 (`njoftime_al/PlaywrightScraper3.py`, site key `njoftime`). njoftime is a **XenForo forum**: every listing is a thread.
+- **Five forums**, scraped in this order (`FORUMS`): Shtëpi në shitje (4), Shtëpi me qera (36), Ambjente biznesi në shitje (37), Ambjente biznesi me qera (38), Truall (39). The forum sets `listing_type` (`Shitet` / `Jepet me qera`) and goes into `Kategoria` with the type field (`Shtëpi në shitje · apartament`), which is what `Derive.property_type()` reads (business → Ambient biznesi, land → Tokë). Pages: the forum url, then `…/page-N`; the last page is the highest `.pageNav-page` link (sale 2419, rent 1155, business 272/633, land 101 on 2026-11-10).
+- **The turn is shared between the forums:** each forum gets `ceil(listings left / forums left)` (demo 5 → 1 each, 50 → 10 each), so the huge sale forum can't take every turn, and a forum that runs out leaves its share to the next. `RESUME_PAGES` holds one resume page per forum (the other scrapers have one `RESUME_PAGE`); `page_url()`, `next_page()` and `clamp_resume_page()` take the forum.
+- **There is no newest-first order.** Threads are sorted by the last "refresh": agencies bump old listings to the top all day, so page 1 mixes thread ids from 1.0M to 1.35M, all stamped within minutes. `?order=post_date` gives the same order (a refresh resets that date). Known UPIDs are still skipped, so each thread is scraped once, but pages reshuffle constantly; listings open in a new tab (like Duashpi) so the results tab never moves.
+- Cards: `.structItem--thread`, including the **sticky** (paid) threads above the normal 30, which XenForo shows on page 1 only. UPID = the thread id (`/threads/<slug>.<id>/`), checked against the opened tab's url.
+- Listing page: JSON-LD `WebPage.mainEntity` = `DiscussionForumPosting` (headline, text, `datePublished`, author). Fields `dl[data-field]` inside the first post, read **by their label** (the type field is `field_1_banimit` / `field_1_biznesi` / `field_1_truallit` per forum, all labelled "Tipi"), renamed by `FIELD_NAMES`: Qyteti, Tipi, Sipërfaqe → `size_m2`, Nr dhoma (`2+1` → `rooms` 2), Kati (`Kati 8` → `8`), Çmimi në Euro, Rruga → `address`, Zona. Description = the first post's `.bbWrapper`; phone = the `tel:` call button; photos = the slider's `a.js-lbImage` hrefs.
+- **Price:** the "Cmimi Euro" field is converted by the site (an `18,500,000 LEKE` listing shows `185.000 €`). The site writes most titles itself with the real currency, so a LEK amount in the title wins (`ALL`), then the € field, then a € amount in a hand-written title.
+- **Date:** `datePublished` (UTC) → Tirana time with `zoneinfo` (needs the `tzdata` package on Windows; without it a fixed +1 h), saved as `10/11/2026` + `11:17` like Gazeta/Duashpi. **A refresh resets this date too**, and njoftime shows the original posting date nowhere, so an old listing refreshed today looks posted today. The card's sort time is kept as `Rifreskuar`. Only the thread id grows with age (an idea for a later "real age" estimate).
+- **Agencies** (no flag on this site): a company logo on the card (`a.company-logo` that isn't `--default`, a paid business profile) **or** a business-sounding account name (`AGENCY_NAME_PATTERN`: imobil, real estate, propert, agjenc/agjens, prona, home, shpk…). Both are on the card, so "Jo Listime Agjensie" skips agency listings **without opening them**. On page 1 of the sale forum 58 of 63 cards count as agencies. A private seller with a logo is skipped too; an agency with a plain name and no logo gets through.
+- No cookie popup and no Cloudflare page seen (plain HTTP works too, via `Tools.FetchHTML --fast`).
+- **Tested 2026-11-10:** offline against saved pages (63 cards, every field), then one live turn of 2 (1 sale + 1 rent, 11 s, both complete, ended `ok`). **Not tested yet:** a non-demo turn, "Jo Listime Agjensie", the business and land forums live, a full Engine turn saving to the DB, headless mode.
 
 ### Turn-based scraping (all sites)
 A run is **one turn**, not a full crawl. Each turn, every site in `Engine.SCRAPERS` scrapes up to `Listings_Per_Turn` (50 in `config.py`, 5 in demo) **new** listings, which the Engine saves before starting the next site. Play in the UI repeats turns, with a break in between, until paused (see [Automatic scraping](#automatic-scraping)). `python3 -m Scraper.Engine` runs a single turn. A turn ends when the site has given 50 new listings, runs out of pages, or the user pauses, so a single turn can't run forever.
@@ -229,6 +244,9 @@ Started 2026-11-09, structure only (the update check isn't built yet).
 - **Before the updater is built:** the version is `"1.0.0/11/2026"`, but the updater must compare versions with `packaging.version.Version` (see `CLAUDE.md` → Versioning and release flow), which rejects that format. Switch to plain `X.Y.Z` (`"1.0.0"`) and keep the release date in the manifest's `released` field.
 
 ## Recent changes
+**2026-11-10:**
+- **New site: njoftime.com** (`njoftime_al/PlaywrightScraper3.py`, key `njoftime`), five forums (homes, business premises and land, for sale and rent). Added to `Engine.SCRAPERS`, `Search.SITES`, the AI prompt and the UI's `SITE_NAMES`. See [Njoftime scraper](#njoftimecom-scraper-working-v1).
+
 **2026-11-09** (on `dev`, after merging Alex's `dev-1`):
 - **Merged Alex's three commits** (dashboard filters and redesign, same-size cards with pagination, and Pyet AI with blocked sellers, the daily start, server hardening and `REVIEW.md`). After pulling them, run `py -3.14 -m pip install anthropic`: the server doesn't start without it, even if the AI isn't used (bug B6 below).
 - **Full review and end-to-end test** of the merged app: scraping, pause, the dashboard, blocking, the export, the security checks and the AI endpoints without a key. Everything passed; the bugs found are the list below.

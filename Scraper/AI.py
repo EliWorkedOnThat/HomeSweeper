@@ -176,7 +176,7 @@ OUTPUT_SCHEMA = {
 
 #Stays byte-identical between calls so it can be cached; anything that changes (known places, the question) goes in the user message
 SYSTEM_PROMPT = f"""You turn questions from Albanian real-estate agents into search filters for HomeSweeper, a local database of property \
-listings scraped from MerrJep.al, Gazeta Celësi and Duashpi.al. You only fill in the filters; a program runs the search.
+listings scraped from MerrJep.al, Gazeta Celësi, Duashpi.al and Njoftime.com. You only fill in the filters; a program runs the search.
 
 How to read the questions:
 - Agents write Albanian, often informally and without ë/ç ("kati 4", "deri 500 euro", "jo agjenci", "2+1 ne tirane"). They may also write English.

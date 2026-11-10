@@ -9,7 +9,7 @@ const TIME_ZONE = "Europe/Tirane"; // The database stores UTC, staff see Albania
 // Rough EUR -> ALL rate, only used to show the price slider in lekë. Must match EUR_TO_ALL in Scraper/Derive.py.
 const EUR_TO_ALL = 100;
 
-const SITE_NAMES = { merrjep: "MerrJep", gazetacelesi: "Gazeta Celësi", duashpi: "Duashpi" };
+const SITE_NAMES = { merrjep: "MerrJep", gazetacelesi: "Gazeta Celësi", duashpi: "Duashpi", njoftime: "Njoftime" };
 const MISSING = ""; // Facet key for "this listing doesn't have the field"
 const MISSING_LABEL = "Pa të dhëna";
 
