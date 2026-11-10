@@ -19,13 +19,13 @@ The end goal is an app that **non-technical staff** use at work. That's why the 
   - `Request2.py` — empty placeholder.
 - `njoftime_al/` — njoftime.com scraper.
   - `PlaywrightScraper3.py` — the working scraper. Exposes `scrape_njoftime(skip_agencies=False, known_upids=(), should_stop=None)`, which runs one turn over five forums and returns a list of listing dicts. See [Njoftime scraper](#njoftimecom-scraper-working-v1).
-- `Scraper/Engine.py` — orchestrator. Runs every site in `SCRAPERS` one after another (MerrJep, then Gazeta Celesi, then Duashpi, then Njoftime) and saves each site's results with its own site key. A crash in one site is logged and the next site still runs. Returns `{found, saved, failed, sites: {site: {...}}}`.
+- `Scraper/Engine.py` — orchestrator. Runs every site in `SCRAPERS` one after another (MerrJep, then Gazeta Celesi, then Duashpi, then Njoftime) and saves each site's results with its own site key. A crash in one site is logged and the next site still runs. Returns `{found, saved, failed, sites: {site: {...}}, paused, seconds}`. Each turn is timed with `Tools/Performance.py` (see [Turn timer](#turn-timer-toolsperformancepy)).
 - `Scraper/DB.py` — the only file that talks to the database (SQLite). See [Database](#database-scraperdbpy).
 - `Scraper/Output.py` — writes listings to `Output/listings.xlsx` (openpyxl).
 - `Scraper/config.py` — global settings shared by every scraper.
 - `Data/` — holds the SQLite database file (`Homesweeper.db`). Created automatically.
 - `Scraper/Server.py` + `UI/` — the local web UI (FastAPI + plain HTML/CSS/JS). See [Phase 2](#phase-2--local-web-ui).
-- `Tools/` — dev utilities. `FetchHTML.py` saves a URL's HTML to `Tools/HTML/` (ignored by Git). It replaces the old `Test/` folder, which has been deleted.
+- `Tools/` — dev utilities. `FetchHTML.py` saves a URL's HTML to `Tools/HTML/` (ignored by Git). `AIEval.py` checks the AI's filters. `Performance.py` is the turn timer the Engine uses. It replaces the old `Test/` folder, which has been deleted.
 - `Output/` — generated Excel output. Ignored by Git.
 - `Analyze.md` — scratch notes and HTML samples (currently MerrJep phone-button markup).
 
@@ -91,7 +91,7 @@ Added 2026-11-10 (`njoftime_al/PlaywrightScraper3.py`, site key `njoftime`). njo
 - **Date:** `datePublished` (UTC) → Tirana time with `zoneinfo` (needs the `tzdata` package on Windows; without it a fixed +1 h), saved as `10/11/2026` + `11:17` like Gazeta/Duashpi. **A refresh resets this date too**, and njoftime shows the original posting date nowhere, so an old listing refreshed today looks posted today. The card's sort time is kept as `Rifreskuar`. Only the thread id grows with age (an idea for a later "real age" estimate).
 - **Agencies** (no flag on this site): a company logo on the card (`a.company-logo` that isn't `--default`, a paid business profile) **or** a business-sounding account name (`AGENCY_NAME_PATTERN`: imobil, real estate, propert, agjenc/agjens, prona, home, shpk…). Both are on the card, so "Jo Listime Agjensie" skips agency listings **without opening them**. On page 1 of the sale forum 58 of 63 cards count as agencies. A private seller with a logo is skipped too; an agency with a plain name and no logo gets through.
 - No cookie popup and no Cloudflare page seen (plain HTTP works too, via `Tools.FetchHTML --fast`).
-- **Tested 2026-11-10:** offline against saved pages (63 cards, every field), then one live turn of 2 (1 sale + 1 rent, 11 s, both complete, ended `ok`). **Not tested yet:** a non-demo turn, "Jo Listime Agjensie", the business and land forums live, a full Engine turn saving to the DB, headless mode.
+- **Tested 2026-11-10:** offline against saved pages (63 cards, every field), then one live turn of 2 (1 sale + 1 rent, 11 s, both complete, ended `ok`). Later the same day, a full non-demo Engine turn of all four sites (50 per site) brought in the expected 200+ listings (commit `85fa8dd`); still needs optimizing and more bug testing. **Not tested yet:** "Jo Listime Agjensie", headless mode.
 
 ### Turn-based scraping (all sites)
 A run is **one turn**, not a full crawl. Each turn, every site in `Engine.SCRAPERS` scrapes up to `Listings_Per_Turn` (50 in `config.py`, 5 in demo) **new** listings, which the Engine saves before starting the next site. Play in the UI repeats turns, with a break in between, until paused (see [Automatic scraping](#automatic-scraping)). `python3 -m Scraper.Engine` runs a single turn. A turn ends when the site has given 50 new listings, runs out of pages, or the user pauses, so a single turn can't run forever.
@@ -140,6 +140,14 @@ Added 2026-11-09. For each new listing, the scraper scrolls to its card and paus
 - `Headless`: `True` runs the scraper browser with no window, and `False` shows it so you can watch a scrape.
 - The rescrape interval is **no longer in config**. The old `Rotation_Rescraping_Time` constant was removed, and staff now pick the interval in the UI (see [Automatic scraping](#automatic-scraping)).
 - `Database_Name = "Homesweeper.db"` is the name of the SQLite file inside `Data/`.
+- **In the repo today (2026-11-10):** `Demo_Environment = False` (real turns of 50, since commit `85fa8dd`) and `Headless = False` (visible browser).
+
+### Turn timer (`Tools/Performance.py`)
+Added 2026-11-10, to measure how long each turn takes.
+- `start_timer()` and `stop_timer()` print the clock time and return a `datetime`; `run_time(start_time, end_time)` prints `Run took N min S s` and returns the `timedelta`.
+- `Engine.main()` starts the timer before the first site and stops it in its `finally` block after the last site, so paused and crashed turns are timed too. The time goes into the summary as `seconds` (a float, one decimal). This covers both `python3 -m Scraper.Engine` and every play turn from the server. The break between turns isn't counted.
+- The UI doesn't show it yet; it's only in the console and the summary dict.
+- **Before packaging (Phase 4):** the Engine now imports from `Tools/` (a namespace package, no `__init__.py`), so either bundle `Tools/Performance.py` with PyInstaller or move the timer into `Scraper/` and log it through the Phase 4 logger.
 
 ### Database (`Scraper/DB.py`)
 We chose **SQLite**. It is built into Python, so there is no server to install or keep running. The whole database is one file, so backing up means copying `Data/Homesweeper.db`. It is reliable when the PC crashes or loses power.
@@ -245,6 +253,9 @@ Started 2026-11-09, structure only (the update check isn't built yet).
 
 ## Recent changes
 **2026-11-10:**
+- **Turn timer:** `Tools/Performance.py`, called by `Engine.main()`, prints each turn's duration and adds `seconds` to the summary. See [Turn timer](#turn-timer-toolsperformancepy).
+- **`Demo_Environment = False` in the repo** (commit `85fa8dd`), so turns are now 50 new listings per site.
+- **First full non-demo Engine turn of all four sites** (commit `85fa8dd`): it brought in the expected 200+ listings. Its duration wasn't recorded; the new timer measures the next ones.
 - **New site: njoftime.com** (`njoftime_al/PlaywrightScraper3.py`, key `njoftime`), five forums (homes, business premises and land, for sale and rent). Added to `Engine.SCRAPERS`, `Search.SITES`, the AI prompt and the UI's `SITE_NAMES`. See [Njoftime scraper](#njoftimecom-scraper-working-v1).
 
 **2026-11-09** (on `dev`, after merging Alex's `dev-1`):
@@ -285,8 +296,8 @@ Work through these in order. Mark each one done here (with the date) when it's f
 The phases below hold the long-term plan. This is the short list of what to pick up next, most important first. The [Bug list](#bug-list-review-of-2026-11-09-most-important-first) above comes first.
 
 **Before agents use it for real**
-1. **Set `Headless = True` and `Demo_Environment = False`** in `config.py` and do a long real run, for an hour or more, with play on and a 1–5 min break. Watch for blocks or captchas, slow turns, and listings that fail. The longest run so far is one full Duashpi turn (50 listings, 6 min, no problems); MerrJep and Gazeta have only had demo turns. A full turn of all three sites will take roughly 15 min, because MerrJep and Duashpi open every listing.
-   - Also test Duashpi with "Jo Listime Agjensie" on (expect it to be slow), and run a full Engine turn so all three sites save to the DB.
+1. **Set `Headless = True` and `Demo_Environment = False`** in `config.py` and do a long real run, for an hour or more, with play on and a 1–5 min break. Watch for blocks or captchas, slow turns, and listings that fail. The longest run so far is one full Duashpi turn (50 listings, 6 min, no problems); A full non-demo Engine turn of all four sites has now run once (2026-11-10, 200+ listings), but not with `Headless = True` and not for hours. Use the turn timer (`Tools/Performance.py`) to record how long a full turn takes; the old estimate was roughly 15 min for three sites, because MerrJep and Duashpi open every listing.
+   - Also test Duashpi with "Jo Listime Agjensie" on (expect it to be slow).
 2. **Persist the runtime state** to `settings.json`: play on/off, the break, "Jo Listime Agjensie", and each site's `RESUME_PAGE`. Today a restart pauses scraping and loses the backfill position (Phase 4, step 4).
 3. **Live progress in the UI.** Show "site X, page N, M new so far" during a turn. The status currently only says running/done.
 4. **Working hours.** Only scrape between set hours, so the PC isn't scraping at night.
@@ -453,6 +464,8 @@ There's no `requirements.txt` yet (to-do item 11), so this list is the source of
     py -3.14 -m Scraper.Engine                    # one turn of every site in the terminal, no UI
     py -3.14 -m GazetaCelesi.PlaywrightScraper    # one Gazeta turn only, prints the listings, doesn't touch the DB
     py -3.14 -m MerrJep_al.PlaywrightScraper1     # one MerrJep turn only, doesn't touch the DB
+    py -3.14 -m Duashpi_al.PlaywrightScraper2     # one Duashpi turn only, doesn't touch the DB
+    py -3.14 -m njoftime_al.PlaywrightScraper3    # one Njoftime turn only, doesn't touch the DB
     py -3.14 -m Tools.FetchHTML <url>             # save a page's HTML to Tools/HTML/ to study a site's markup
 
 In the UI, choose the break between turns, then press **▶ Nis mbledhjen**. Press **⏸ Pauzë** to stop. New listings appear after every turn, and the blue label counts them.

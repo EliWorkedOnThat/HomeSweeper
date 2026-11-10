@@ -7,6 +7,7 @@ from njoftime_al.PlaywrightScraper3 import scrape_njoftime
 from Scraper.Console import utf8_output
 from Scraper.Output import save_listings as export_to_excel
 from Scraper.DB import connect_to_db, create_tables, save_listing, get_known_upids
+from Tools.Performance import start_timer, stop_timer, run_time
 
 #Every site we scrape: (site key saved in the database, function that returns the list of listing dicts)
 #They run one after another, never at the same time (the server's SCRAPE_LOCK covers the whole run)
@@ -30,6 +31,7 @@ def main(skip_agencies=False, should_stop=None):
 
     stopped = should_stop or (lambda: False)
     summary = {"found": 0, "saved": 0, "failed": 0, "sites": {}, "paused": False}
+    started = start_timer() #Times the whole turn, every site included, the result is printed and added to the summary
     try:
         create_tables(connection)
 
@@ -47,6 +49,8 @@ def main(skip_agencies=False, should_stop=None):
         return summary
     finally:
         connection.close()
+        #Runs even if the turn was paused or crashed, so every turn reports its time
+        summary["seconds"] = round(run_time(started, stop_timer()).total_seconds(), 1)
 
 #Function to run one site's scraper and save what it found, a crash on one site doesn't stop the others
 def run_site(connection, site, scrape, skip_agencies, should_stop):
