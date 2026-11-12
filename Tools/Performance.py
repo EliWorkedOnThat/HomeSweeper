@@ -1,5 +1,4 @@
 #This file will esentially just act as a timer for now and time each full run
-import time
 from datetime import datetime as dt
 from rich import print
 

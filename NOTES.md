@@ -1,6 +1,6 @@
 ﻿# HomeSweeper project notes
 
-_Last updated: 2026-11-10_
+_Last updated: 2026-11-12_
 
 ## Purpose
 HomeSweeper is an early-stage collection of real-estate listing scrapers. Each target site has its own folder for its site-specific scraper code (Playwright browser scraper + direct HTTP request scraper). Shared coordination, configuration, database and output logic lives in `Scraper/`.
@@ -205,7 +205,11 @@ All filtering runs in the browser on the listings the server hands over. `enrich
 - `DB.get_listings` raises `DBError` (shown as 503) instead of returning `[]`. Tables are created once in the lifespan, not per request.
 - **Console encoding:** every entry point calls `Scraper.Console.utf8_output()` first; titles are `rich.markup.escape`d before printing. `Engine.run_site` guards each save, the auto loop catches its own errors, and quitting pauses a running turn and waits up to 30 s.
 - **Demo through a tunnel:** set `HOMESWEEPER_PUBLIC_HOST=<public name>` before starting the server, or the Host check answers 400. It makes the listings (with phones), scraping controls and the paid AI reachable by anyone with the link, so use it for short demos only and never in the shipped app.
-- The full review with the roadmap is in `REVIEW.md`.
+- **Windows paths in URLs are refused** (`no_windows_paths` middleware, 2026-11-12): any path with `\`, `:` or a NUL byte gets a 404 before `StaticFiles` sees it. Without it, `/%5c%5cevil.com%5cshare` made `StaticFiles` call `realpath()` on a UNC path, which opens an SMB connection (it can leak the agent's NTLM hash) and holds a worker for ~40 s. Any website could trigger it with an `<img>` pointing at 127.0.0.1. Keep this middleware.
+- **Ids in URLs are bounded** (`RowId`, 1 to 2^63-1), and request bodies use `StrictInt`/`StrictBool`, so a huge id answers 422 instead of a 500 and `true` is no longer read as 1 minute.
+- **The AI spending cap reads the `ai_usage` ledger**, not `ai_searches`: deleting questions from Historia no longer resets it, and paid calls that failed (refusal, `max_tokens`, an unreadable answer) are counted. The app never deletes `ai_usage` rows.
+- **Scraper logs don't print phone numbers** (only "found"/"Not available"), and MerrJep no longer dumps each listing's JSON during a turn, so log files (Phase 4) won't hold sellers' personal data. The `python -m <site scraper>` dev runs still print full listings, on purpose.
+- The full review with the roadmap is in `REVIEW.md`; the 2026-11-10 security and bug audit is in `AUDIT_2026-11-10.txt`.
 
 ### Pyet AI (`Scraper/AI.py`, `Scraper/Search.py`, `Scraper/Derive.py`)
 Agents type a question in Albanian (or English) on the **Pyet AI** tab. The results show below the question, and every question is saved in the **Historia** sidebar beside them (on top, folded, on phones). Each search has its own address, `#/ai/<id>`, so the back button and a reload keep it; the old `#/historia` link redirects to `#/ai`.
@@ -252,6 +256,14 @@ Started 2026-11-09, structure only (the update check isn't built yet).
 - **Before the updater is built:** the version is `"1.0.0/11/2026"`, but the updater must compare versions with `packaging.version.Version` (see `CLAUDE.md` → Versioning and release flow), which rejects that format. Switch to plain `X.Y.Z` (`"1.0.0"`) and keep the release date in the manifest's `released` field.
 
 ## Recent changes
+**2026-11-12 (fixes from `AUDIT_2026-11-10.txt`):**
+- **#1 (critical) fixed:** Windows UNC/drive/NUL paths answer 404 at once (see [Server safety](#server-safety-and-speed-2026-11-06)). Tested on a real uvicorn: `/%5c%5c10.255.255.1%5cs%5cx` now takes 5 ms (was 42 s).
+- **#2 fixed:** `Output.append_row()` no longer reads `sheet.max_row` (it scanned every cell). A 5,000-row export takes 2 s instead of ~60 s; `=` text is still stored as text, not a formula.
+- **#3 fixed:** `Search.CENTER_TAG` and `Derive.CENTER_DISTANCE` have a lookbehind, so a description full of digits can't stall every search (200,000 digits: 0.03 s).
+- **B5 fixed:** the AI cap uses the new `ai_usage` table (created by `create_tables()`, no migration needed).
+- **Low items fixed:** 500s on huge ids and `posted_within_days` (capped at 36,500), Duashpi `split_location(",")`, gallery photos go through `safeUrl()`, strict request types, `utf8_output()` in every scraper's `__main__`, "Njoftime" added to the header, pyflakes clean.
+- **Still open from the audit:** #4 (the API sends every listing, slow at ~20k), #5/B2 ("Jo agjenci" on MerrJep and Njoftime), B9 (fallback model priced at Opus rates), B10-B12, the data sanity items (a sale at 750 €, "Shitet në ankand", condition wording), the time picker's AM/PM, the request body size limit (only our own page can send a body), and the version string format.
+
 **2026-11-10:**
 - **Turn timer:** `Tools/Performance.py`, called by `Engine.main()`, prints each turn's duration and adds `seconds` to the summary. See [Turn timer](#turn-timer-toolsperformancepy).
 - **`Demo_Environment = False` in the repo** (commit `85fa8dd`), so turns are now 50 new listings per site.
@@ -277,7 +289,7 @@ Work through these in order. Mark each one done here (with the date) when it's f
 | B2 | **MerrJep `posted_by` is "Kompani" on every listing.** If private sellers are marked "Kompani" too, then "Jo agjenci" (dashboard and AI) drops all of MerrJep, and blocking a private MerrJep seller blocks everyone with that name on every site (`Derive.block_rule_of` matches companies by name). **Check first:** the value comes straight from MerrJep's own "Njoftim nga" tag, and every MerrJep seller seen so far really is an agency (ARKA HOME, Vero Home Real Estate, Century 21…). Find a MerrJep listing without the `span.isstore` agency badge and see what its "Njoftim nga" says. All 10 MerrJep listings in the DB (2026-11-09) are "Kompani", from 7 sellers that really are agencies, so it's unconfirmed. | **Waiting:** checking with Alex (2026-11-09) | MerrJep scraper, `Derive.py` |
 | B3 | **Property type from place names.** A title with "studio" or "vila" beats "apartament" / "2+1": "APARTAMENT 1+1 … KINOSTUDIO" becomes Garsoniere, "2+1 … PRANE VILA GOLD" becomes Vilë. The AI never relaxes the property type, so it silently drops these. **Fixed:** `property_type()` now picks the kind named **earliest** in the text (the list order only breaks ties), and "studio" must start a word. "Apartament për zyrë" is now an Apartament, not Ambient biznesi. Tested on 11 sample titles; of the 25 stored listings only "Apartament 2+1, Vila L" changed (Vilë → Apartament). Known limit: a title that names the place first ("Vila Gold, apartament 2+1") still becomes a Vilë; check the "Prona" filter after a bigger scrape. | **Done 2026-11-09** | `Derive.py` |
 | B4 | **Excel export misses columns:** no city, type, m², rooms, condition, posted by, address or first seen (Gazeta and Duashpi have no city or type at all), and the headers are English. | **In progress:** the 9 columns were added and the headers are Albanian (2026-11-09). Still to do: the derived values (property type, merged condition, price in €, €/m², floor…), values staff read (site names, Tirana time), and the layout (frozen header, filters, widths, clickable link). | `Output.py`, `Server.py` |
-| B5 | **The $2 daily AI cap can be bypassed:** deleting today's questions from Historia resets it, and paid questions that failed (refusal, `max_tokens`, unreadable answer) are never counted. | Open | `DB.py`, `Server.py`, `AI.py` |
+| B5 | **The $2 daily AI cap can be bypassed:** deleting today's questions from Historia resets it, and paid questions that failed (refusal, `max_tokens`, unreadable answer) are never counted. **Fixed:** the cap reads the `ai_usage` ledger, which Historia can't delete from, and failed paid calls are recorded there too. | **Done 2026-11-12** | `DB.py`, `Server.py`, `AI.py` |
 | B6 | **The server doesn't start without `anthropic` installed**, even when the AI isn't used. Import it only when a question is asked. | Open | `Server.py`, `AI.py` |
 | B7 | MerrJep waited 30 s on a card that moved to the next page, then skipped it until a restart | **Done 2026-11-09** | scrapers |
 | B8 | **Scraper failures are invisible:** the turn's "failed" count only counts DB save errors. Each scraper's `LAST_TURN` now says how its turn ended, so the Engine and the UI can show it. | Open | `Engine.py`, `UI/app.js` |

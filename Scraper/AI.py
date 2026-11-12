@@ -23,11 +23,14 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01" #If Opus 5.5 declines a questi
 PRICE_INPUT, PRICE_OUTPUT, PRICE_CACHE_READ, PRICE_CACHE_WRITE = 4.00, 20.00, 0.20, 5.00
 
 #Shown to agents when something goes wrong, so it's Albanian
+#usage/model are set when Claude did answer (so the call was paid) but the answer couldn't be used; the server still counts its cost
 class AIError(Exception):
-    def __init__(self, message_sq, status=502):
+    def __init__(self, message_sq, status=502, usage=None, model=None):
         super().__init__(message_sq)
         self.message_sq = message_sq
         self.status = status
+        self.usage = usage
+        self.model = model
 
 #Function that finds the API key, None if there isn't one yet
 def api_key():
@@ -260,10 +263,11 @@ def question_to_filters(question, known_places, known_areas=()):
         raise AIError("Shërbimi i AI ktheu një gabim. Provo përsëri.")
 
     usage = usage_of(response)
+    model = getattr(response, "model", MODEL)
     if response.stop_reason == "refusal":
-        raise AIError("AI nuk pranoi ta përpunojë këtë pyetje. Provo ta shkruash ndryshe.", status=422)
+        raise AIError("AI nuk pranoi ta përpunojë këtë pyetje. Provo ta shkruash ndryshe.", status=422, usage=usage, model=model)
     if response.stop_reason == "max_tokens":
-        raise AIError("Pyetja ishte shumë e gjatë për t'u përpunuar. Provo ta shkurtosh.", status=422)
+        raise AIError("Pyetja ishte shumë e gjatë për t'u përpunuar. Provo ta shkurtosh.", status=422, usage=usage, model=model)
 
     text = next((block.text for block in response.content if block.type == "text"), None)
     try:
@@ -271,14 +275,14 @@ def question_to_filters(question, known_places, known_areas=()):
         filters = Filters.model_validate(expand_ranges(data["filters"]))
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, ValidationError) as error:
         print(f"[red]Could not read Claude's filters: {error}\n{text}[/red]")
-        raise AIError("AI ktheu një përgjigje që nuk u kuptua. Provo përsëri.")
+        raise AIError("AI ktheu një përgjigje që nuk u kuptua. Provo përsëri.", usage=usage, model=model)
 
     print(f"[cyan]AI search: {question!r} -> {filters.model_dump(exclude_defaults=True)} ({usage['cost_usd']:.4f} USD)[/cyan]")
     return {
         "filters": filters,
         "understood": data.get("understood_sq") or "",
         "not_supported": data.get("not_supported_sq"),
-        "model": getattr(response, "model", MODEL),
+        "model": model,
         "usage": usage,
     }
 

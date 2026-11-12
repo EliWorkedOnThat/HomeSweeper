@@ -12,6 +12,7 @@ import random
 import re
 import time
 import traceback
+from Scraper.Console import utf8_output
 from Scraper.config import Demo_Environment, Rest_Time, Headless, Listings_Per_Turn
 
 #Global Variables
@@ -435,7 +436,7 @@ def process_listing_containers(page, skip_agencies=False):
                 print(f"[green]Scraped: {escape(str(data['title']))}[/green]")
                 print(f"[bright_green]Price: {data['price']} {escape(str(data['currency']))}[/bright_green]")
                 print(f"[bright_green]Images: {len(data['images'])}[/bright_green]")
-                print(f"[bright_green]Phone: {escape(str(data['phone'] or 'Not available'))}[/bright_green]")
+                print(f"[bright_green]Phone: {'found' if data['phone'] else 'Not available'}[/bright_green]")
 
         except TurnStop:
             raise
@@ -621,6 +622,8 @@ def split_location(location):
     if not location:
         return None, None
     parts = [part.strip() for part in location.split(",") if part.strip()]
+    if not parts: #Only commas and spaces, e.g. ","
+        return None, None
     last = parts[-1]
     if len(parts) == 1 and last not in CITY_NAMES and last not in CITY_NAMES.values():
         return None, location
@@ -765,5 +768,6 @@ def combine_phones(phone_1, phone_2):
 
 #Run this file on its own for a quick test: python -m Duashpi_al.PlaywrightScraper2
 if __name__ == "__main__":
+    utf8_output()
     for listing in scrape_duashpi_al() or []:
         print(escape(json.dumps(listing, indent=4, ensure_ascii=False)))

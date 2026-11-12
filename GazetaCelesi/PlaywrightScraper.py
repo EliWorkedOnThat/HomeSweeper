@@ -13,6 +13,7 @@ import random
 import re
 import time
 import traceback
+from Scraper.Console import utf8_output
 from Scraper.config import Demo_Environment, Rest_Time, Headless, Listings_Per_Turn
 
 #Global Variables
@@ -381,7 +382,7 @@ def process_ads(page, ads, skip_agencies=False):
             print(f"[green]Scraped: {escape(str(data['title']))}[/green]")
             print(f"[bright_green]Price: {data['price']} {escape(str(data['currency']))}[/bright_green]")
             print(f"[bright_green]Images: {len(data['images'])}[/bright_green]")
-            print(f"[bright_green]Phone: {escape(str(data['phone'] or 'Not available'))}[/bright_green]")
+            print(f"[bright_green]Phone: {'found' if data['phone'] else 'Not available'}[/bright_green]")
 
         except TurnStop:
             raise
@@ -543,5 +544,6 @@ def to_tirana_time(timestamp):
 
 #Run this file on its own for a quick test: python -m GazetaCelesi.PlaywrightScraper
 if __name__ == "__main__":
+    utf8_output()
     for listing in scrape_gazetacelesi():
         print(escape(json.dumps(listing, indent=4, ensure_ascii=False)))

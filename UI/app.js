@@ -1022,7 +1022,7 @@ function openGallery(l, startIndex) {
 
     function show(i) {
         current = (i + images.length) % images.length;
-        main.src = images[current];
+        main.src = safeUrl(images[current]) || "";
         counter.textContent = `${current + 1} nga ${images.length}`;
         [...thumbs.children].forEach((t, n) => t.classList.toggle("active", n === current));
         thumbs.children[current]?.scrollIntoView({ block: "nearest", inline: "nearest" });

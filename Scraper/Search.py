@@ -31,8 +31,10 @@ MANY_PHOTOS = 5 #"many_photos" preference: at least this many photos
 TARGET_POINTS = 2 #A listing exactly on a price/size target scores this much, falling to 0 at twice the distance of the target itself
 MAX_KNOWN_AREAS = 80 #Area names sent to the AI with each question
 CENTER_KM_DEFAULT = 1.5 #"In the centre" for listings that give a distance (Duashpi), when the AI doesn't set one
+MAX_POSTED_DAYS = 36500 #posted_within_days is capped here (100 years), a bigger number overflows date arithmetic
 #The distance tag itself says "nga qendra", so it's removed from the searchable text or every Duashpi listing would match "qendra"
-CENTER_TAG = re.compile(r"\d+(?:[.,]\d+)?\s*k?m\s+nga\s+qendra")
+#The lookbehind stops a match starting in the middle of a number; without it a long run of digits took quadratic time
+CENTER_TAG = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)?\s*k?m\s+nga\s+qendra")
 NEAR_MISS_WHEN = 6 #Fewer results than this: also show listings that miss exactly one requirement
 NEAR_MISS_MAX = 12
 FAR_MISSES = ("Vendi", "Larg qendrës", "Nuk thuhet që është në qendër")
@@ -106,7 +108,7 @@ class Filters(BaseModel):
     @field_validator("posted_within_days")
     @classmethod
     def not_negative(cls, value):
-        return value if value is None else max(0, value)
+        return value if value is None else max(0, min(MAX_POSTED_DAYS, value)) #A huge number overflowed date arithmetic (a 500)
 
 #Helper function: one regex that matches any of the words at the start of a word, accents and case ignored
 def word_pattern(words):

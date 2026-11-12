@@ -92,11 +92,13 @@ def clean_cell(value):
 #Helper function to add one row to a sheet as plain values: openpyxl turns any text starting with "=" into a live formula,
 #and sellers write their own titles and descriptions, so "=HYPERLINK(...)" would become a working link in the agent's Excel.
 #Those cells are switched back to text, so Excel shows exactly what the seller wrote and never runs it (we never write real formulas)
+#The row is found with _current_row (set by append()), never sheet.max_row: max_row scans every cell, which made big exports quadratic
 def append_row(sheet, values):
     sheet.append(values)
-    for cell in sheet[sheet.max_row]:
-        if cell.data_type == "f":
-            cell.data_type = "s"
+    row = sheet._current_row
+    for column, value in enumerate(values, start=1):
+        if isinstance(value, str) and value.startswith("="):
+            sheet.cell(row=row, column=column).data_type = "s"
 
 #Helper function to turn one listing dict into a flat row (attributes get their own columns), every value and column name cleaned
 #The row's keys are the database names for the columns above and the site's own names for its tags (marked if they clash)

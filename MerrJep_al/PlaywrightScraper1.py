@@ -7,6 +7,7 @@ import random
 import re
 import time
 import traceback
+from Scraper.Console import utf8_output
 from Scraper.config import Demo_Environment, Rest_Time, Headless, Listings_Per_Turn
 
 #Global Variables
@@ -412,11 +413,10 @@ def process_listing_containers(page, skip_agencies=False):
 
             #Scraped text is escaped: rich would read a title like "[/b] SHITET" as markup and raise
             print(f"\n[bold green]PROPERTY DATA — UPID: {upid}[/bold green]")
-            print(escape(json.dumps(data, indent=4, ensure_ascii=False)))
             print(f"[green]Scraped: {escape(str(data['title']))}[/green]")
             print(f"[bright_green]Price: {data['price']} {escape(str(data['currency']))}[/bright_green]")
             print(f"[bright_green]Images: {len(data['images'])}[/bright_green]")
-            print(f"[bright_green]Phone: {escape(str(data['phone'] or 'Not available'))}[/bright_green]")
+            print(f"[bright_green]Phone: {'found' if data['phone'] else 'Not available'}[/bright_green]")
 
         except TurnStop:
             raise
@@ -584,4 +584,6 @@ def combine_phones(phone_1, phone_2):
 
 #Call each function as needed this will act as the orchestrator
 if __name__ == "__main__":
-    create_browser_instance()
+    utf8_output()
+    for listing in create_browser_instance() or []:
+        print(escape(json.dumps(listing, indent=4, ensure_ascii=False)))

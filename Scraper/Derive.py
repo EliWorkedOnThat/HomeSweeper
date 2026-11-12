@@ -122,7 +122,8 @@ def features_of(tags):
     return features
 
 #Duashpi tags give the distance to the city centre: "2.4km nga qendra", "982m nga qendra"
-CENTER_DISTANCE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(km|m)\s+nga\s+qendra")
+#The lookbehind stops a match starting in the middle of a number; without it a long run of digits took quadratic time
+CENTER_DISTANCE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(km|m)\s+nga\s+qendra")
 
 #Function that reads the distance to the centre in km from the tags, None when the site doesn't give one
 def center_km(tags):
