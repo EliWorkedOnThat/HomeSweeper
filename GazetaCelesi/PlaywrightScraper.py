@@ -14,7 +14,7 @@ import re
 import time
 import traceback
 from Scraper.Console import utf8_output
-from Scraper.config import Demo_Environment, Rest_Time, Headless, Listings_Per_Turn
+from Scraper.config import Demo_Environment, Rest_Time, Headless, Listings_Per_Turn, Window_Position, Window_Size, Use_Installed_Chrome
 
 #Global Variables
 SITE_URL = "https://www.gazetacelesi.al"
@@ -114,12 +114,18 @@ def run_turn(page, skip_agencies):
 
 #Helper function to open the browser, with no window when Headless is True (copied from the MerrJep scraper, see CLAUDE.md gotchas)
 def launch_browser(p):
+    #Without this flag navigator.webdriver is true, which tells every script on the site "this browser is automated"
+    args = ["--disable-blink-features=AutomationControlled"]
     if not Headless:
-        browser = p.chromium.launch(headless=False)
+        #A normal, visible browser, opened where config.py says (Window_Position off screen keeps it out of the agent's way)
+        if Window_Position:
+            args.append(f"--window-position={Window_Position[0]},{Window_Position[1]}")
+        if Window_Size:
+            args.append(f"--window-size={Window_Size[0]},{Window_Size[1]}")
+        browser = start_browser(p, args)
         return browser, browser.new_page()
 
-    #channel="chromium" uses Chrome's newer headless mode: the full browser with no window, so it keeps real plugins and the real GPU
-    browser = p.chromium.launch(headless=True, channel="chromium")
+    browser = start_browser(p, args)
 
     #Headless still says "HeadlessChrome" in its user agent, so read the real one and drop the "Headless" part (keeps the right version and OS)
     probe = browser.new_page()
@@ -128,6 +134,18 @@ def launch_browser(p):
 
     context = browser.new_context(user_agent=user_agent)
     return browser, context.new_page()
+
+#Helper function to start the agent's own Google Chrome (Use_Installed_Chrome in config.py), or Playwright's Chromium when that's
+#off or Chrome isn't installed. Real Chrome sends "Google Chrome" in its Sec-CH-UA header and Playwright's Chromium only
+#"Chromium", which few real people use. Either way it gets a fresh, empty profile (never the agent's bookmarks or logins), and
+#headless runs Chrome's newer headless mode: the full browser with no window, so it keeps real plugins and the real GPU.
+def start_browser(p, args):
+    if Use_Installed_Chrome:
+        try:
+            return p.chromium.launch(channel="chrome", headless=Headless, args=args)
+        except PlaywrightError as error:
+            print(f"[yellow]Google Chrome didn't start ({escape(str(error).splitlines()[0])}), using Playwright's Chromium instead[/yellow]")
+    return p.chromium.launch(channel="chromium", headless=Headless, args=args)
 
 #Helper function to clear the last turn's state and load what this turn should skip
 def reset_state(known_upids=(), skip_agencies=False):
@@ -219,7 +237,7 @@ def classify(error):
         return TEMPORARY
     if isinstance(error, MarkupError):
         return MARKUP
-    if isinstance(error, PlaywrightError):
+    if isinstance(error, PlaywrightError): # pyright: ignore[reportArgumentType]  (Pylance misreads Playwright's Error alias as a TypeVar; it is a class)
         message = str(error).lower()
         if any(text in message for text in BROWSER_GONE_MESSAGES):
             return BROWSER_GONE

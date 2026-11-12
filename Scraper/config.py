@@ -15,5 +15,19 @@ Listings_Per_Turn = 50
 #Boolean to run the scraper browser invisibly in the background (Set to False to watch the browser window while debugging)
 Headless = False
 
+#Where the scraper's browser window opens when Headless is False, as (x, y) in pixels from the top-left corner of the main screen.
+#Negative numbers put it off screen: it stays a normal, windowed browser but doesn't get in the way. (On a PC with a second
+#monitor to the left or above, -2000 may land on that monitor; use bigger numbers like (-10000, -10000) there.)
+#Set it to None to open the window normally on screen, to watch the scraper while debugging.
+Window_Position = None #Off screen: (-2000, -2000). On screen for now, to watch the scraper work.
+
+#Size of that window in pixels, (width, height). None lets Chromium pick.
+Window_Size = (1280, 720)
+
+#True = scrape with the Google Chrome installed on this PC (sites see "Google Chrome", like a real user), falling back to
+#Playwright's Chromium if Chrome isn't installed. False = always use Playwright's Chromium.
+#Either way the scraper gets a fresh, empty profile: never the PC owner's bookmarks, logins or open windows.
+Use_Installed_Chrome = True
+
 #Database name to use for all scrapers
 Database_Name = "Homesweeper.db"

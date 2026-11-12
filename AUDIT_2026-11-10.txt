@@ -220,3 +220,117 @@ SUGGESTED ORDER
 4. Turn the test scripts into a pytest suite (Derive/Search fuzz, API security checks, race test).
 5. Slim list endpoint + incremental loading (?since=) before agents reach ~5k listings.
 6. Add the new findings to the Bug list in NOTES.md.
+
+
+=====================================================================================
+ADDENDUM 2026-11-12: THE SCRAPER BROWSER (INSTALLED CHROME vs PLAYWRIGHT CHROMIUM) AND ITS WINDOW
+=====================================================================================
+Tested on branch dev with the uncommitted browser changes (start_browser(), Use_Installed_Chrome,
+Window_Position/Window_Size, --disable-blink-features=AutomationControlled, the pyright ignore).
+Nothing in the repo was changed by this addendum and nothing was saved to the DB or Excel.
+Windows 11, Google Chrome 157.0.8103.51 installed, Playwright 1.64.1 with its Chromium 156.0.8078.4.
+
+HOW IT WAS TESTED
+- Live: one short turn of 2 new listings per site (known UPIDs from the DB skipped), in three setups:
+  installed Chrome windowed (off screen), Playwright Chromium windowed (off screen), installed Chrome headless.
+  12 turns in total, called through each scraper's own entry function.
+- Headers: each scraper's launch_browser() opened https://httpbin.org/headers (echoes the request headers).
+- Window: Chrome and Chromium, window on screen / off screen (-2000,-2000) / minimized; measured the window
+  state (CDP Browser.getWindowForTarget), document.visibilityState, requestAnimationFrame ticks, and which
+  window has keyboard focus (Win32 GetForegroundWindow) before and after each step a scraper does.
+- Fallback: "Chrome not installed" simulated. Process and temp-folder leaks checked after ~35 launches.
+- Static: pyflakes, compileall, importing every module, node --check app.js, the 31 checks from this
+  audit's #1-#3/B5 tests, the four error-handling blocks and launch helpers compared (identical).
+
+RESULTS
+- All 12 live turns ended "ok", 2 listings each, no crash, no block, no captcha, no fallback.
+                      Chrome window   Chromium window   Chrome headless
+    MerrJep             20.8 s           21.0 s            20.8 s
+    Gazeta Celesi       39.4 s *         16.8 s            17.4 s
+    Duashpi             20.9 s           19.9 s            19.9 s
+    Njoftime            16.1 s           15.6 s            16.3 s
+  * First turn after the process started: RESUME_PAGE lives in memory, so it walked pages 1-4 before
+    finding new listings (known, CLAUDE.md "State lives in memory"). Not browser related.
+- Data is the same in every setup: Gazeta and Njoftime returned the identical listings in all three;
+  every field was filled except one Gazeta listing (1882612) with no price and no photos in all three
+  setups (that is the listing's own data, not a browser difference).
+- Headers (all four scrapers, both modes):
+    navigator.webdriver   true before -> false now (AutomationControlled flag)
+    Sec-CH-UA             "Chromium";v="156" -> "Google Chrome";v="157", "Chromium";v="157" (Use_Installed_Chrome)
+    User-Agent            Chrome/157 Windows, identical headless and windowed; no "HeadlessChrome" anywhere
+- Fallback: with Chrome "missing" it printed the yellow warning and scraped with Chromium 156.
+- Leaks: 0 automated browser processes left after ~35 launches. 4 empty playwright* folders in %TEMP%,
+  all from earlier runs that were killed instead of closed (harmless, 0 MB).
+- Pylance "TypeVar not allowed" on isinstance(error, PlaywrightError): false positive (Playwright
+  exports Error as an alias; Python confirms it is a class). Silenced with a pyright ignore in all four
+  scrapers; the error-handling blocks are still byte-identical.
+
+FINDINGS
+W1  HIGH (windowed mode only): the scraper's window takes keyboard focus every time a browser starts
+    What:  With Headless = False, launching Chrome or Chromium makes it the active window, even when it is
+           off screen. Every site launches its own browser, so that is 4 focus grabs per turn, every few
+           minutes in continuous mode. Off screen makes it worse: the agent can't see the window that now
+           has focus, so what they type (an email, a search) goes into the hidden scraper window.
+    Evidence: foreground window before launch "HomeSweeper security aud... (VS Code)" -> after launch
+           "about:blank - Google Chrome" (same with Chromium, "Google Chrome for Testing").
+           Headless: focus never moved.
+    Only the launch does it: after focus was given back (Win32 SetForegroundWindow to the previous
+           window, returned 1), Ctrl+click into a new tab, tab.bring_to_front() and page.bring_to_front()
+           did NOT take it again (off-screen window).
+    Caveat: measured with the test started from VS Code (the foreground app). Windows limits which
+           processes may take focus, so the packaged tray app may behave differently; test it there.
+    Fix:   (a) Ship Headless = True, as CLAUDE.md -> Packaging already says. Headless now sends exactly the
+               same headers as the windowed browser (above), so a window buys nothing against detection.
+           (b) If a window must stay: right after launch_browser(), give focus back to the window that had
+               it (Windows: ctypes GetForegroundWindow before launch, SetForegroundWindow after). Tested to
+               work and to stay. Windows only; macOS would need its own code.
+W2  MEDIUM: a minimized scraper window always comes back
+    What:  Minimizing the window doesn't hide it. Opening a listing in a new tab (Ctrl+click) restores the
+           window, and so does bring_to_front(). MerrJep, Duashpi and Njoftime do both for every listing;
+           Gazeta never opens tabs, so it alone would stay minimized.
+    Evidence: minimized, then: mouse wheel / evaluate / wait / plain click -> stays minimized;
+           Ctrl+click new tab -> normal; page.bring_to_front() -> normal. Same in Chrome and Chromium.
+    Fix:   Don't use minimizing to hide the window. Use headless (W1 a) or the off-screen position.
+           Removing bring_to_front() would not be enough (the new tab alone restores the window).
+W3  MEDIUM: the off-screen position is only proven on Windows with one monitor
+    - macOS keeps windows (at least their title bar) on screen and is likely to pull a window at
+      -2000,-2000 back into view. Untested; check on a Mac before relying on it there.
+    - A second monitor to the left of or above the main one can sit at those coordinates
+      (config.py says to use bigger negatives there).
+    - The window still has a taskbar button; clicking it shows nothing useful to the agent.
+W4  LOW, before committing: config.py has Window_Position = None (window on screen, set on purpose to
+    watch the scraper). Whoever pulls it (Alex) gets visible scraper windows on screen. Set it back to
+    (-2000, -2000) when done watching, or decide W1 first.
+W5  LOW: Chrome fallback edge cases (untested here)
+    - A company-managed Chrome whose policy forbids remote debugging can't be driven, so every site would
+      fall back to Chromium every turn, printing the warning 4x per turn. Works, but noisy; once per run
+      would be enough.
+    - Chrome installed per user (%LOCALAPPDATA%) or on macOS (/Applications) was not tested here.
+    - Chrome updates itself (157 today vs Playwright's 156). Fine today; after a Playwright upgrade or a
+      big Chrome update, run one short turn.
+W6  INFO: visibility. A window that is off screen or minimized still reports document.visibilityState
+    "visible" with ~100 animation frames per 500 ms (Playwright starts Chrome with its background-
+    throttling switches off), so pages behave like a visible tab. No problem found.
+
+WHAT IS GOOD (verified)
+- Installed Chrome and Playwright Chromium scrape the same data at the same speed on all four sites.
+- The "automated" flag is gone and the brand is "Google Chrome" in every scraper and both modes.
+- Headless and windowed are indistinguishable in the headers.
+- The fallback to Chromium works; browsers close cleanly; the agent's own Chrome profile is never used.
+
+RECOMMENDATION
+1. Decide W1: headless (recommended, already the plan for the shipped app) or windowed + focus return.
+2. Until then keep Headless = False only for watching/debugging, and don't minimize the window.
+3. Set Window_Position back to (-2000, -2000) before committing (W4).
+4. Later: print the Chrome fallback warning once per run (W5); test the off-screen window on a Mac (W3).
+
+CONCLUSION (owner, 2026-11-12)
+- Headless (Headless = True) fixes W1, W2 and W3: no window means no focus grab, nothing to restore and
+  nothing to place off screen, and the headers are identical to the windowed browser. It is the way to run
+  the scrapers for real; the window is for watching and debugging only. Switching Chrome <-> Chromium does
+  NOT fix them (both behave the same).
+- Open question for W2: the owner saw a minimized window stay down while Chrome showed the "controlled by
+  automated test software" bar. This test minimized the window through CDP, not with the real minimize
+  button, and only a new listing tab restores it (Gazeta opens none; between listings nothing does).
+  Repeat with a real minimize and note which site was running before changing anything.
+- Left as is for now: Window_Position = None in config.py (W4) and the Chrome fallback warning (W5).
