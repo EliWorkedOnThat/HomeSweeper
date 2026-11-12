@@ -28,7 +28,7 @@
     --radius: 14px;
     --gap: 16px;
     --card-w: 340px; /* Every listing card, on the dashboard strip and in AI results */
-    --card-h: clamp(560px, calc(100vh - 96px), 720px); /* A whole card fits under the header, even on a 1366×768 laptop */
+    --card-h: 640px; /* Fixed on PC (phones override it below); clicking a card opens all of it (openCardOnClick in app.js) */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -609,6 +609,9 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s;
 }
 .card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); border-color: var(--border-strong); }
+/* A click or tap anywhere on a card opens "Detajet" (see openCardOnClick in app.js); buttons, links and the photo keep their own click */
+.card { cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .card:hover { border-color: var(--accent); } }
 @media (prefers-reduced-motion: reduce) { .card, .card:hover { transition: none; transform: none; } .cards { scroll-behavior: auto; } }
 
 /* ---------- Pagination ---------- */

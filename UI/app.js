@@ -966,16 +966,29 @@ function buildCard(l) {
 
     body.append(head, specs, chips, facts, footer);
     card.append(buildPhoto(l), body);
+    openCardOnClick(card, l);
     return card;
 }
 
+// Cards have a fixed size and anything that doesn't fit fades out, so a click or tap anywhere on one opens everything
+// ("Detajet"), on PCs and phones alike. Buttons, links and the photo (gallery) keep their own click, and selecting text
+// (to copy it) doesn't open it. Swiping the strip on a phone doesn't count as a tap, so it still scrolls.
+function openCardOnClick(card, l) {
+    card.addEventListener("click", (e) => {
+        if (e.target.closest("a, button, .card-photo")) return;
+        if (String(getSelection() || "")) return;
+        openDetails(l);
+    });
+}
+
 // Mark every box whose content is cut off, so it shows the ⤢ icon and opens a preview when clicked
+// Boxes inside a card never get it: the whole card opens instead (openCardOnClick)
 function markOverflow(root) {
     root.querySelectorAll(".box").forEach((b) => {
         const value = b.querySelector(".clamp, .clamp-block");
         const cut = value && (value.scrollHeight > value.clientHeight + 1 || value.scrollWidth > value.clientWidth + 1);
         const cutRow = [...b.querySelectorAll(".ellipsis")].some((e) => e.scrollWidth > e.clientWidth + 1);
-        const expandable = Boolean(b.preview) && (cut || cutRow);
+        const expandable = Boolean(b.preview) && (cut || cutRow) && !b.closest(".card");
 
         b.classList.toggle("expandable", expandable);
         if (expandable) {
