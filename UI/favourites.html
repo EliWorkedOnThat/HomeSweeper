@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="sq">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Të preferuarat · HomeSweeper</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<!-- data-page tells app.js this isn't the dashboard, so it skips the dashboard's startup (favourites.js starts this page) -->
+<body data-page="favourites">
+    <!-- All text the user sees must be in Albanian (see CLAUDE.md) -->
+    <!-- Favourites: the listings the agent has saved. Served at /favourites by serve_favourite_page() in Scraper/Server.py -->
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7M5 10v10h14V10M10 20v-6h4v6"/></svg>
+            </span>
+            <div class="brand-text">
+                <h1>HomeSweeper</h1>
+                <span class="brand-sub">Njoftimet që ke ruajtur si të preferuara</span>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <!-- Same tabs as index.html; the first two go back to its hash views -->
+        <nav class="views" aria-label="Faqet">
+            <a href="/#/" class="view-tab">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7M5 10v10h14V10"/></svg>
+                Njoftimet
+            </a>
+            <a href="/#/ai" class="view-tab">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
+                Pyet AI
+            </a>
+            <a href="/favourites" class="view-tab" aria-current="page">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.5-9.3C1.2 8.6 3.2 5 6.6 5c2.2 0 3.6 1.2 5.4 3.2C13.8 6.2 15.2 5 17.4 5c3.4 0 5.4 3.6 4.1 6.7C19.5 16.4 12 21 12 21z"/></svg>
+                Të preferuarat
+            </a>
+        </nav>
+
+        <div id="load-error" class="load-error" role="alert" hidden>
+            <span id="load-error-text"></span>
+            <button id="load-retry" class="btn btn-small" type="button">Provo përsëri</button>
+        </div>
+
+        <section class="stats">
+            <div class="stat stat-accent">
+                <span class="stat-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M12 21s-7.5-4.6-9.5-9.3C1.2 8.6 3.2 5 6.6 5c2.2 0 3.6 1.2 5.4 3.2C13.8 6.2 15.2 5 17.4 5c3.4 0 5.4 3.6 4.1 6.7C19.5 16.4 12 21 12 21z"/></svg></span>
+                <div class="stat-text"><span class="stat-value" id="fav-total">–</span><span class="stat-label">Njoftime të preferuara</span></div>
+            </div>
+        </section>
+
+        <!-- Search and sort within the favourites only -->
+        <section class="filters">
+            <div class="filters-top">
+                <input id="fav-search" type="search" placeholder="Kërko te të preferuarat: titull, adresë, telefon, shitës…" aria-label="Kërko te të preferuarat">
+                <select id="fav-sort" title="Rendit sipas" aria-label="Rendit sipas">
+                    <!-- Values are SORTS keys in app.js. No "recently favourited": only true/false is stored, not when. -->
+                    <option value="newest">Më të rejat</option>
+                    <option value="oldest">Më të vjetrat</option>
+                    <option value="price-asc">Çmimi: nga më i ulëti</option>
+                    <option value="price-desc">Çmimi: nga më i larti</option>
+                    <option value="perm2-asc">Çmimi për m²: nga më i ulëti</option>
+                    <option value="size-desc">Më të mëdhatë</option>
+                    <option value="rooms-desc">Më shumë dhoma</option>
+                    <option value="title">Titulli A → Z</option>
+                </select>
+            </div>
+        </section>
+
+        <!-- The same fixed-size cards as the dashboard, in a wrapping grid -->
+        <section id="fav-cards" class="cards-grid" aria-label="Njoftimet e preferuara"></section>
+
+        <div id="fav-empty" class="rs-empty" hidden>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.5-9.3C1.2 8.6 3.2 5 6.6 5c2.2 0 3.6 1.2 5.4 3.2C13.8 6.2 15.2 5 17.4 5c3.4 0 5.4 3.6 4.1 6.7C19.5 16.4 12 21 12 21z"/></svg>
+            <h3>Ende nuk ke njoftime të preferuara</h3>
+            <p>Shtyp zemrën te një njoftim te faqja <a href="/#/">Njoftimet</a> dhe ai do të shfaqet këtu.</p>
+        </div>
+        <p id="fav-no-match" class="empty" hidden>Asnjë njoftim i preferuar nuk përputhet me kërkimin.</p>
+    </main>
+
+    <!-- One shared popup for every preview: long text, tags, photo gallery and the full listing -->
+    <dialog id="preview" class="preview" aria-labelledby="preview-title">
+        <div class="preview-head">
+            <h2 id="preview-title"></h2>
+            <button id="preview-close" class="btn btn-ghost" aria-label="Mbyll" title="Mbyll">✕</button>
+        </div>
+        <div id="preview-body" class="preview-body"></div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <!-- app.js first: favourites.js uses its cards and helpers. The CSP blocks inline scripts, so the logic stays in .js files. -->
+    <script src="app.js"></script>
+    <script src="favourites.js"></script>
+</body>
+</html>

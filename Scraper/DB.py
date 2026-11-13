@@ -58,9 +58,16 @@ def create_tables(connection):
                     attributes      TEXT, --JSON dict of the listing's tags (size, rooms, city...)
                     first_seen      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_seen       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    favourite       BOOLEAN NOT NULL DEFAULT FALSE,
                     UNIQUE (site, upid) --The same listing can never be saved twice
                 )
             """)
+            #CREATE TABLE IF NOT EXISTS never changes a table that already exists, so columns added later are added here.
+            #Checks the real columns, so it's safe on a new DB (column already there) and on an old one (column missing).
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(listings)")}
+            if "favourite" not in columns:
+                connection.execute("ALTER TABLE listings ADD COLUMN favourite BOOLEAN NOT NULL DEFAULT FALSE")
+                print("[green]Added the favourite column to the listings table[/green]")
             #Every "Pyet AI" question, so the History page can show it and re-run its filters without asking the AI again
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS ai_searches (
@@ -209,10 +216,22 @@ def get_listings(connection, site=None):
             listing = dict(row)
             listing["images"] = json.loads(listing["images"] or "[]") #Turn the JSON text back into a list
             listing["attributes"] = json.loads(listing["attributes"] or "{}") #And back into a dict
+            listing["favourite"] = bool(listing["favourite"]) #SQLite stores booleans as 0/1, the UI gets true/false
             listings.append(listing)
         return listings
     except sqlite.Error as e:
         print(f"[red]Error reading listings: {e}[/red]")
+        raise DBError(str(e)) from e
+
+#Function to mark a listing as a favourite or not (the heart on the card). Returns True if the listing exists.
+#Raises DBError, so a failed save never looks like "listing not found". save_listing() never touches this column,
+#so a favourite stays one when the listing is scraped again.
+def set_favourite(connection, listing_id, favourite):
+    try:
+        with connection:
+            return connection.execute("UPDATE listings SET favourite = ? WHERE id = ?", (favourite, listing_id)).rowcount > 0
+    except sqlite.Error as e:
+        print(f"[red]Error saving favourite for listing {listing_id}: {e}[/red]")
         raise DBError(str(e)) from e
 
 #Function to get the blocked sellers, oldest first. Raises DBError, so a read failure never shows blocked sellers again by accident.

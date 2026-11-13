@@ -15,16 +15,16 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi import Path as PathParam
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, StrictBool, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 from rich import print
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from Scraper import AI
 from Scraper.Console import utf8_output
 from Scraper.DB import (DB_FILE, DBError, add_blocked_seller, ai_cost_today, connect_to_db, create_tables, delete_ai_search,
                         delete_blocked_seller, get_ai_search, get_ai_searches, get_blocked_sellers, get_known_places, get_listings,
-                        listings_version, record_ai_usage, save_ai_search)
+                        listings_version, record_ai_usage, save_ai_search, set_favourite)
 from Scraper.Derive import block_rule_of, blocked_rules, is_blocked, with_derived
 from Scraper.Engine import main as run_engine
 from Scraper.Output import build_workbook
@@ -98,6 +98,12 @@ def cached_listings(connection):
         if LISTINGS_CACHE["version"] != version:
             LISTINGS_CACHE.update(version=version, listings=with_derived(get_listings(connection)))
         return LISTINGS_CACHE["listings"]
+
+#Helper function: throw the cached listings away, so the next request reads them again. For changes listings_version() can't
+#see, like a favourite (it only notices new listings and saves). Call it after the change is committed.
+def forget_cached_listings():
+    with LISTINGS_LOCK:
+        LISTINGS_CACHE["version"] = None
 
 #Helper function: the given listings without the ones from blocked sellers. Used by everything that shows listings.
 def without_blocked(connection, listings):
@@ -347,6 +353,10 @@ class ScheduleRequest(BaseModel):
 class BlockRequest(BaseModel):
     listing_id: StrictInt
 
+class FavouriteRequest(BaseModel):
+    listing_id: Annotated[StrictInt, Field(ge=1, le=2**63 - 1)] #Same limits as RowId below, SQLite can't take a bigger number
+    favourite: StrictBool #The value to set, not a toggle, so a double click or a retried request can't flip it back
+
 #An id from the URL. SQLite ids fit in 64 bits; a bigger number raised OverflowError (a 500) instead of a clean 404/422.
 RowId = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
 
@@ -574,6 +584,18 @@ def api_blocked_delete(blocked_id: RowId):
     finally:
         connection.close()
 
+#Endpoint: mark a listing as a favourite or not (the heart on the card)
+@app.post("/api/favourite")
+def api_favourite(body: FavouriteRequest):
+    connection = open_db()
+    try:
+        if not set_favourite(connection, body.listing_id, body.favourite):
+            raise HTTPException(status_code=404, detail="Ky njoftim nuk u gjet.")
+    finally:
+        connection.close()
+    forget_cached_listings() #The cache can't see this change by itself
+    return {"id": body.listing_id, "favourite": body.favourite}
+
 #Endpoint: download every stored listing as an Excel file, built fresh from the database
 @app.get("/api/export")
 def api_export():
@@ -589,6 +611,11 @@ def api_export():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+#Endpoint: the favourites page at the short address /favourites (the mount below also serves it as /favourites.html)
+@app.get("/favourites")
+def serve_favourite_page():
+    return FileResponse(UI_DIR / "favourites.html")
 
 #Serve the UI folder (index.html, style.css, app.js) at the root, must come after the /api routes
 app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")

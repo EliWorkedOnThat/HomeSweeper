@@ -83,6 +83,9 @@ let scrapeState = "idle";
 
 const $ = (id) => document.getElementById(id);
 const dialog = $("preview");
+// Which page loaded this script: the dashboard (index.html) or a page that only reuses the cards, named by
+// <body data-page="…"> (favourites.html). Only the dashboard runs startDashboard() at the bottom.
+const PAGE = document.body.dataset.page || "dashboard";
 
 // ---------- Small helpers ----------
 
@@ -661,8 +664,9 @@ function clearFilters() {
     render();
 }
 
-function sortListings(listings) {
-    const [key, direction] = SORTS[$("f-sort").value] || SORTS.newest;
+// sort is a SORTS key; the favourites page passes its own dropdown's value
+function sortListings(listings, sort = $("f-sort").value) {
+    const [key, direction] = SORTS[sort] || SORTS.newest;
     const dir = direction === "asc" ? 1 : -1;
     return listings.sort((a, b) => {
         const x = a[key], y = b[key];
@@ -832,6 +836,7 @@ const ICONS = {
     camera: "M4 8h3l2-3h6l2 3h3v11H4zM12 10a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z",
     external: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
     image: "M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9.5a1.5 1.5 0 1 0 0 .01",
+    heart: "M12 21s-7.5-4.6-9.5-9.3C1.2 8.6 3.2 5 6.6 5c2.2 0 3.6 1.2 5.4 3.2C13.8 6.2 15.2 5 17.4 5c3.4 0 5.4 3.6 4.1 6.7C19.5 16.4 12 21 12 21z",
 };
 
 function icon(name) {
@@ -865,7 +870,7 @@ function photoBadges(l) {
 function buildPhoto(l) {
     const photo = el("div", "card-photo");
     const images = l.images || [];
-    photo.append(photoBadges(l));
+    photo.append(photoBadges(l), favButton(l));
     if (!images.length) {
         photo.append(withIcon("image", "photo-empty", "Pa foto"));
         return photo;
@@ -879,6 +884,52 @@ function buildPhoto(l) {
     photo.title = "Shiko fotot";
     photo.addEventListener("click", () => openGallery(l, 0));
     return photo;
+}
+
+// ---------- Favourites ----------
+// The heart over the photo. The value is saved in the listings table (favourite column), so it survives restarts and new scrapes.
+
+function favButton(l) {
+    const button = el("button", "card-fav");
+    button.type = "button";
+    button.dataset.id = l.id;
+    button.append(icon("heart"));
+    showFavourite(button, l.favourite);
+    button.addEventListener("click", (e) => {
+        e.stopPropagation(); // The photo behind it opens the gallery
+        toggleFavourite(l);
+    });
+    return button;
+}
+
+function showFavourite(button, on) {
+    const label = on ? "Hiq nga të preferuarat" : "Shto te të preferuarat";
+    button.classList.toggle("is-fav", on);
+    button.setAttribute("aria-pressed", String(on));
+    button.setAttribute("aria-label", label);
+    button.title = label;
+}
+
+// The heart changes at once and turns back if the server can't save it. Every card of this listing follows
+// (the dashboard and the AI results can both show it). One request at a time per listing, so clicks can't arrive out of order.
+async function toggleFavourite(l) {
+    if (l._favSaving) return;
+    const on = !l.favourite;
+    const showAll = (value) => document.querySelectorAll(`.card-fav[data-id="${l.id}"]`).forEach((b) => showFavourite(b, value));
+    l._favSaving = true;
+    l.favourite = on;
+    showAll(on);
+    try {
+        await postJSON("/api/favourite", { listing_id: l.id, favourite: on });
+        toast(on ? "U shtua te të preferuarat." : "U hoq nga të preferuarat.");
+        document.dispatchEvent(new CustomEvent("favourite-changed", { detail: l })); // The favourites page drops the card
+    } catch (error) {
+        l.favourite = !on;
+        showAll(!on);
+        alert(error.message && !error.message.includes("fetch") ? error.message : "Serveri nuk përgjigjet. Sigurohu që është i ndezur.");
+    } finally {
+        l._favSaving = false;
+    }
 }
 
 function buildCard(l) {
@@ -1348,7 +1399,9 @@ async function unblockSeller(item) {
 }
 
 // The server leaves blocked sellers out of every result, so everything on screen is fetched again
+// Other pages (favourites.js) have none of the dashboard's lists, so they get an event and reload their own
 async function refreshAfterBlock() {
+    if (PAGE !== "dashboard") return document.dispatchEvent(new Event("listings-changed"));
     listingsReady = loadListings();
     await Promise.all([listingsReady, loadBlocked()]);
     if (aiState) rerunAIFilters();
@@ -1975,7 +2028,6 @@ document.addEventListener("keydown", (e) => {
         b.preview();
     }
 });
-$("load-retry").addEventListener("click", () => (listingsReady = loadListings()));
 
 // Closing the preview: ✕ button, Esc (built into <dialog>) or clicking the dark backdrop
 $("preview-close").addEventListener("click", () => dialog.close());
@@ -1988,97 +2040,106 @@ dialog.addEventListener("close", () => {
     $("preview-body").replaceChildren();
 });
 
-const renderSoon = debounce(render, 150);
-$("f-search").addEventListener("input", () => {
-    filters.search = norm($("f-search").value.trim());
-    renderSoon();
-});
-$("f-sort").addEventListener("change", render);
-$("f-missing").addEventListener("change", () => {
-    filters.includeMissing = $("f-missing").checked;
-    render();
-});
-$("f-clear").addEventListener("click", clearFilters);
+const renderSoon = debounce(render, 150); // Also used by the range inputs (sliderInput), so it stays out here
 
-// The filter panel folds away behind one button
-$("filters-toggle").addEventListener("click", () => {
-    const open = $("filters-panel").classList.toggle("open");
-    $("filters-toggle").setAttribute("aria-expanded", String(open));
-});
+// Everything below belongs to the dashboard (index.html). Pages that only reuse the cards (favourites.html) don't have
+// these elements, so they skip it and start themselves (favourites.js).
+function startDashboard() {
+    $("load-retry").addEventListener("click", () => (listingsReady = loadListings()));
 
-// A multi-select closes when you click anywhere else or press Esc
-document.addEventListener("click", (e) => {
-    FACETS.forEach((f) => f.root.open && !f.root.contains(e.target) && (f.root.open = false));
-});
-document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") FACETS.forEach((f) => (f.root.open = false));
-});
+    $("f-search").addEventListener("input", () => {
+        filters.search = norm($("f-search").value.trim());
+        renderSoon();
+    });
+    $("f-sort").addEventListener("change", render);
+    $("f-missing").addEventListener("change", () => {
+        filters.includeMissing = $("f-missing").checked;
+        render();
+    });
+    $("f-clear").addEventListener("click", clearFilters);
 
-// Re-check which boxes are cut off when the window size changes
-window.addEventListener("resize", debounce(() => {
-    markOverflow($("cards"));
-    updateStripNav();
-}, 150));
+    // The filter panel folds away behind one button
+    $("filters-toggle").addEventListener("click", () => {
+        const open = $("filters-panel").classList.toggle("open");
+        $("filters-toggle").setAttribute("aria-expanded", String(open));
+    });
 
-$("cards-prev").addEventListener("click", () => scrollStrip(-1));
-$("cards-next").addEventListener("click", () => scrollStrip(1));
-$("cards").addEventListener("scroll", debounce(updateStripNav, 60), { passive: true });
+    // A multi-select closes when you click anywhere else or press Esc
+    document.addEventListener("click", (e) => {
+        FACETS.forEach((f) => f.root.open && !f.root.contains(e.target) && (f.root.open = false));
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") FACETS.forEach((f) => (f.root.open = false));
+    });
 
-$("scrape-btn").addEventListener("click", toggleAuto);
-$("auto-interval").addEventListener("change", changeAutoInterval);
-$("schedule-on").addEventListener("change", saveSchedule);
-$("schedule-time").addEventListener("change", saveSchedule);
-$("pref-agency").addEventListener("change", changePreferences);
-setInterval(updateCountdown, 1000);
+    // Re-check which boxes are cut off when the window size changes
+    window.addEventListener("resize", debounce(() => {
+        markOverflow($("cards"));
+        updateStripNav();
+    }, 150));
 
-$("facets").replaceChildren(...FACETS.map(buildFacet));
-$("ranges").replaceChildren(...RANGES.map(buildRange));
-// Pyet AI and its history
-$("ask-form").addEventListener("submit", askAI);
-$("ask-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) askAI(e);
-});
-buildCapabilities();
-$("ai-sort").replaceChildren(...AI_SORTS.map(([value, label]) => {
-    const option = el("option", null, label);
-    option.value = value;
-    return option;
-}));
-$("ai-sort").addEventListener("change", () => {
-    aiState.filters.sort = $("ai-sort").value;
-    rerunAIFilters();
-});
-$("ai-reset").addEventListener("click", () => {
-    aiState.filters = structuredClone(aiState.search.filters);
-    rerunAIFilters();
-});
-$("ai-edit").addEventListener("click", () => {
-    $("ask-input").value = aiState.search.question;
-    $("ask-card").scrollIntoView({ behavior: "smooth", block: "start" });
-    $("ask-input").focus({ preventScroll: true });
-});
-$("new-search").addEventListener("click", () => {
-    location.hash = "#/ai";
-    closeSideOnPhone();
-    $("ask-input").focus();
-});
-$("history-filter").addEventListener("input", debounce(renderHistory, 120));
-// Phones: the history folds away behind one button above the question box
-$("side-toggle").addEventListener("click", () => {
-    const open = document.body.classList.toggle("side-open-mobile");
-    $("side-toggle").setAttribute("aria-expanded", String(open));
-});
-$("ai-more").addEventListener("click", () => {
-    aiState.shown += AI_PAGE;
-    drawAIResults();
-});
-window.addEventListener("resize", debounce(() => {
-    markOverflow($("ai-cards"));
-    markOverflow($("ai-near-cards"));
-}, 150));
-window.addEventListener("hashchange", showView);
+    $("cards-prev").addEventListener("click", () => scrollStrip(-1));
+    $("cards-next").addEventListener("click", () => scrollStrip(1));
+    $("cards").addEventListener("scroll", debounce(updateStripNav, 60), { passive: true });
 
-listingsReady = loadListings();
-loadBlocked();
-checkStatus();
-showView();
+    $("scrape-btn").addEventListener("click", toggleAuto);
+    $("auto-interval").addEventListener("change", changeAutoInterval);
+    $("schedule-on").addEventListener("change", saveSchedule);
+    $("schedule-time").addEventListener("change", saveSchedule);
+    $("pref-agency").addEventListener("change", changePreferences);
+    setInterval(updateCountdown, 1000);
+
+    $("facets").replaceChildren(...FACETS.map(buildFacet));
+    $("ranges").replaceChildren(...RANGES.map(buildRange));
+    // Pyet AI and its history
+    $("ask-form").addEventListener("submit", askAI);
+    $("ask-input").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) askAI(e);
+    });
+    buildCapabilities();
+    $("ai-sort").replaceChildren(...AI_SORTS.map(([value, label]) => {
+        const option = el("option", null, label);
+        option.value = value;
+        return option;
+    }));
+    $("ai-sort").addEventListener("change", () => {
+        aiState.filters.sort = $("ai-sort").value;
+        rerunAIFilters();
+    });
+    $("ai-reset").addEventListener("click", () => {
+        aiState.filters = structuredClone(aiState.search.filters);
+        rerunAIFilters();
+    });
+    $("ai-edit").addEventListener("click", () => {
+        $("ask-input").value = aiState.search.question;
+        $("ask-card").scrollIntoView({ behavior: "smooth", block: "start" });
+        $("ask-input").focus({ preventScroll: true });
+    });
+    $("new-search").addEventListener("click", () => {
+        location.hash = "#/ai";
+        closeSideOnPhone();
+        $("ask-input").focus();
+    });
+    $("history-filter").addEventListener("input", debounce(renderHistory, 120));
+    // Phones: the history folds away behind one button above the question box
+    $("side-toggle").addEventListener("click", () => {
+        const open = document.body.classList.toggle("side-open-mobile");
+        $("side-toggle").setAttribute("aria-expanded", String(open));
+    });
+    $("ai-more").addEventListener("click", () => {
+        aiState.shown += AI_PAGE;
+        drawAIResults();
+    });
+    window.addEventListener("resize", debounce(() => {
+        markOverflow($("ai-cards"));
+        markOverflow($("ai-near-cards"));
+    }, 150));
+    window.addEventListener("hashchange", showView);
+
+    listingsReady = loadListings();
+    loadBlocked();
+    checkStatus();
+    showView();
+}
+
+if (PAGE === "dashboard") startDashboard();

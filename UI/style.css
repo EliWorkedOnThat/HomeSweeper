@@ -156,6 +156,7 @@ body.no-scroll { overflow: hidden; } /* Page stays put while a preview is open *
 .topbar .btn-primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
 .topbar .btn-on { background: rgb(91 140 255 / 0.2); border-color: #7aa2ff; color: #fff; box-shadow: none; }
 .topbar select option { color: #0f172a; background: #fff; }
+#favourites-btn .icon { color: #fb7185; fill: currentColor; } /* A filled heart, like a favourited card */
 
 /* ---------- Scrape status pill ---------- */
 .status {
@@ -279,7 +280,7 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--chip-bg);
 }
-#f-search {
+#f-search, #fav-search {
     flex: 1 1 260px;
     padding-left: 38px;
     box-shadow: var(--shadow-sm);
@@ -723,6 +724,32 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
     font-size: 12px;
     backdrop-filter: blur(4px);
 }
+/* The heart over the photo, bottom left (the badges sit at the top, the photo count bottom right). Filled red = favourite. */
+.card-fav {
+    position: absolute;
+    z-index: 1;
+    left: 10px;
+    bottom: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: rgb(255 255 255 / 0.92);
+    color: #0f172a;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+    cursor: pointer;
+    transition: transform 0.15s, color 0.15s;
+}
+.card-fav .icon { width: 18px; height: 18px; }
+.card-fav:hover { transform: scale(1.08); color: #e11d48; }
+.card-fav:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card-fav.is-fav { color: #e11d48; }
+.card-fav.is-fav .icon { fill: currentColor; }
+@media (pointer: coarse) { .card-fav { width: 44px; height: 44px; } }
 
 .card-body {
     flex: 1 1 auto;
@@ -1464,13 +1491,14 @@ main { padding: 22px 28px 48px; max-width: 1640px; margin: 0 auto; }
     .auto-group { flex: 1 1 100%; }
     .auto-group select { flex: 1 1 0; }
     .schedule-group { flex: 1 1 100%; }
-    .top-select, #export-btn { flex: 1 1 0; }
+    .top-select { flex: 1 1 100%; } /* Its own row, three controls in one row squeezed it down to the arrow */
+    #favourites-btn, #export-btn { flex: 1 1 0; }
     .stat { flex-basis: calc(50% - 6px); padding: 12px; gap: 10px; }
     .stat-icon { width: 34px; height: 34px; border-radius: 10px; }
     .stat-icon .icon { width: 18px; height: 18px; }
     .stat-value { font-size: 20px; }
     .preview-body { padding: 14px 16px 18px; }
-    #f-search { flex-basis: 100%; }
+    #f-search, #fav-search { flex-basis: 100%; }
     #f-sort { flex: 1 1 0; }
     .filters-panel { padding: 14px; }
     .ms { flex: 1 1 calc(50% - 4px); }
