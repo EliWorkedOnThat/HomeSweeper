@@ -6,24 +6,17 @@ test saved nothing.
 
 For a new coding session: read SUMMARY, then NEW FINDINGS, then the "Bug list" in NOTES.md.
 Finding numbers are kept from the first audit (#1-#5, B1-B16, W1-W6); new ones are N1-N10.
+Only open findings are listed: a finding is removed from this file once it's fixed, and what was fixed and when is
+recorded in NOTES.md (Recent changes and the Bug list). Removed as fixed so far: #1, #2, #3, #5/B2, B5, N1, N2, N4, N5,
+the LOW items fixed on 2026-11-12, Njoftime's "Ina FutureHome" name check, and the missing requirements.txt.
 
 =====================================================================================
 SUMMARY
 =====================================================================================
-Fixed since 2026-11-10 and re-verified today:
-  #1 (critical, UNC/SMB paths), #2 (quadratic Excel), #3 (quadratic regex), B5 (AI cap ledger),
-  the 500s on huge ids and posted_within_days, Duashpi split_location(","), gallery safeUrl(),
-  strict request types, utf8_output() in the scrapers' __main__, "Njoftime" in the header,
-  phone numbers out of the scraper logs, pyflakes clean.
 New and most important:
-  N1 HIGH  one listing with a very long number in its "Kati"/"Banjo" tag takes the dashboard,
-           the AI search and the blocked list down (500 on every request) until the row is deleted.
-  N2 HIGH  "Jo agjenci" / "Person privat" keeps 0 of 178 MerrJep and 0 of 105 Njoftime listings.
-           B2 is answered: MerrJep's private sellers are tagged "Person fizik", which nothing maps.
   N3 MED   rentals stored as sales (5 whose own title says "me qira"), 20 "sales" under 5.000 €.
-  N4 MED   every heart click throws the whole listings cache away (+2.5 s on the next load at 20k).
 Still open: #4 (sending every listing to the browser), B6, B8, B9, B10-B13, B15, B16, the data
-sanity items, no tests / CI / requirements.txt, state in memory, the version string.
+sanity items, no tests / CI, state in memory, the version string.
 
 =====================================================================================
 HOW IT WAS TESTED (2026-11-13)
@@ -50,72 +43,11 @@ HOW IT WAS TESTED (2026-11-13)
 Test scripts (temporary scratchpad, may be deleted; a good start for a pytest suite):
   C:\Users\mezin\AppData\Local\Temp\claude\dd1e7efd1d97eb82\6cbc8336-c1a8-45ed-8280-fe57663d34c1\scratchpad\
   seed.py (test DBs), checks.py (API + fixes + favourites), harness.py (real server, fake engine),
-  scale.py (20k timings), race.py, fuzz.py, bigint.py (N1), ui_test.py, live.py
-
-=====================================================================================
-STATUS OF THE 2026-11-10 FINDINGS
-=====================================================================================
-FIXED (re-verified today)
-  #1  UNC / drive / NUL paths: 404 in ~1 ms on a real uvicorn (/%5c%5c10.255.255.1%5cs%5cx was 42 s).
-      Also covers /favourites%5c..%5c..%5cData. UI and API still served normally.
-  #2  Excel: 5,000 rows in 5.1 s; the full 20,000-listing export in 8.8 s (was > 5 min).
-      "=..." text is still stored as text, never as a formula.
-  #3  CENTER_TAG / CENTER_DISTANCE: 200,000 digits in 0.04 s, same matches as before.
-  B5  AI cap: failed paid calls are counted, deleting history doesn't reset it, over the cap -> 429
-      before any paid call.
-  LOW ids above 2^63 -> 422; posted_within_days 1e6 and -1e30 -> 200; interval_minutes true / "5" / 5.0
-      -> 422; split_location(",") -> (None, None); gallery uses safeUrl(); every scraper __main__ calls
-      utf8_output(); header names all four sites; pyflakes clean.
-  Logs: the scrapers print "found"/"Not available" instead of phone numbers; MerrJep no longer dumps
-      each listing's JSON.
-
-STILL OPEN (details under STILL OPEN below)
-  #4 scale; #5/B2 -> replaced by N2; B6; B8; B9; B10; B11; B12; B13; B15; B16; data sanity
-  (sale at 750 €, "Shitet në ankand", condition wording); Search.searchable_text crashes on a
-  non-string phone; "kati -1" not read; "Ina FutureHome" still counts as private; no request body
-  size limit; time picker format follows the browser locale; version string; no tests/CI/requirements.
+  scale.py (20k timings), race.py, fuzz.py, bigint.py (huge numbers in tags), ui_test.py, live.py
 
 =====================================================================================
 NEW FINDINGS
 =====================================================================================
-
-N1  HIGH  One listing can take the dashboard, the AI search and the blocked list down
-    Where: Scraper/Derive.py first_int() (line ~137), called by derive() for the "Kati",
-           "Kati (Numri i kateve)", "Banjo" and "Tualete" tags; with_derived() (line ~249) has no guard.
-    What:  first_int() does int() on the first run of digits. Python refuses int() on more than
-           4,300 digits (ValueError). derive() runs for every listing whenever the listings cache is
-           rebuilt, so one such tag makes every rebuild fail.
-    Evidence (DB copy + one listing with {"Kati": "1" x 5000}):
-           GET /api/listings 500, POST /api/ai/search 500, GET /api/blocked 500, and they stay 500
-           (the cache is never filled). The dashboard and the AI page are empty for that agent, and
-           every agent who scraped the same listing gets the same. Agents can't delete the row.
-    Caveat: not verified whether any site lets a seller type 4,300+ digits into a floor/bathroom
-           field (Njoftime's fields are free text typed by the seller, and nothing caps them).
-    Fix:   (a) first_int: read at most a few digits, e.g. re.search(r"-?\d{1,4}", ...), or catch
-               ValueError and return None.
-           (b) Defence in depth: in with_derived(), wrap derive() per listing (try/except -> log it and
-               use derived = {}), so no future bug in one listing can blank the whole app.
-           Retest: bigint.py must give 200 on all three endpoints.
-
-N2  HIGH  "Jo agjenci" / "Person privat" drops every private seller on MerrJep and Njoftime
-    Where: MerrJep_al/PlaywrightScraper1.py ATTRIBUTE_COLUMNS ("Njoftim nga" -> posted_by, line 38);
-           njoftime_al/PlaywrightScraper3.py line ~541 (posted_by = "Kompani" or None);
-           Scraper/Derive.py posted_by_of() (line ~206, only Duashpi gets "Person privat" for empty).
-    What:  This answers B2. MerrJep's own tag tells the two apart: 176 listings say "Kompani" and 2 say
-           "Person fizik" ("Bleona", and MerrJep's own sandbox test listing). So the "Kompani" values
-           are right, but "Person fizik" is stored as-is and isn't one of the shared values
-           (Search.POSTED_BY = "Kompani", "Person privat"). Njoftime marks only agencies and leaves
-           private sellers empty, and Derive doesn't fill them in like it does for Duashpi.
-    Evidence (real DB copy):
-           AI posted_by = Person privat keeps: merrjep 0/178, njoftime 0/105, duashpi 35/105,
-           gazetacelesi 50/105.
-           Dashboard "Postuar nga": MerrJep shows a separate "Person fizik" option; Njoftime's 14
-           private listings have no value, so ticking "Person privat" hides them.
-    Why it matters: finding private sellers is the main reason agents buy this.
-    Fix:   map "Person fizik" -> "Person privat" in the MerrJep scraper (the shared-wording rule) or in
-           Derive; in posted_by_of(), treat empty as "Person privat" for njoftime too (same reason as
-           Duashpi). Saved rows are corrected by Derive at read time, so no re-scrape is needed if it's
-           done there. Also see #5: "Ina FutureHome" still passes Njoftime's name check as private.
 
 N3  MEDIUM  Rentals stored as sales, and impossible sale prices
     Where: each scraper's listing_type mapping; Derive.derive() only sanity-checks rents (RENT_EUR_RANGE).
@@ -131,22 +63,6 @@ N3  MEDIUM  Rentals stored as sales, and impossible sale prices
     Fix:   treat a sale under ~5.000 € like the rent check does (no price for filters/sorts), and flag
            a "Shitet" whose title says "jepet / me qira / me qera" (or let the title win). Skip sellers
            named "Sandbox" / titles with "test private" on MerrJep.
-
-N4  MEDIUM (at 20k listings)  Every heart click rebuilds the whole listings cache
-    Where: Scraper/Server.py api_favourite() -> forget_cached_listings() (line ~104 / ~596).
-    What:  correct (tested: the change shows at once, API == DB after 343 parallel writes), but it
-           throws away the derived copy of every listing. The next /api/listings, AI search or
-           blocked-list request re-reads and re-derives all of them while holding LISTINGS_LOCK, so
-           every other request waits.
-    Evidence at 20,000 listings: /api/listings 2.4 s cached -> 4.9 s right after one heart click.
-           Unnoticeable at today's ~500 listings.
-    Fix:   under LISTINGS_LOCK, set listing["favourite"] on the cached dict instead of dropping the
-           cache (set_favourite already committed it).
-
-N5  LOW  The favourites page downloads every listing to show the favourites
-    Where: UI/favourites.js loadFavourites() fetches /api/listings and filters favourite == true.
-    Evidence: 20k listings, 20 favourites: 44 MB JSON (10 MB gzipped), 3.6 s before the 20 cards show.
-    Fix:   with #4: /api/listings?favourite=1 (or the slim list endpoint).
 
 N6  LOW  Two more quadratic regexes (same shape as #3), on short inputs today
     - njoftime_al/PlaywrightScraper3.py LEK_PRICE_PATTERN / EUR_PRICE_PATTERN (lines 111-112), run on
@@ -184,7 +100,7 @@ STILL OPEN (carried over, re-checked today)
 =====================================================================================
 HIGH
 #4  Sending every listing to the browser doesn't scale (measured again at 20,000 listings)
-    /api/listings       44.3 MB JSON (10.0 MB gzipped); 2.4 s cached, 4.9 s on a rebuild (see N4)
+    /api/listings       44.3 MB JSON (10.0 MB gzipped); 2.4 s cached, 4.9 s on a rebuild
     Browser             first cards 3.1 s (was 7.5 s); loadListings() after EVERY finished turn 2.9 s
                         (was 4.8 s); a filter change render() 169 ms (fine)
     Server memory       272 MB after loading, 680 MB after one Excel export (was 621 MB)
@@ -192,7 +108,7 @@ HIGH
                         searchable_text() is still built for every listing on every search
     Excel export        8.8 s (fixed by #2)
     Fix (unchanged): slim list endpoint (card fields only) + /api/listings/{id} + ?since= for new rows
-    (REVIEW.md roadmap #10); cache searchable_text per listing in the listings cache; then N4 and N5.
+    (REVIEW.md roadmap #10); cache searchable_text per listing in the listings cache.
 
 MEDIUM
 - B6   The server still needs the anthropic package to start (Server.py imports AI, AI imports
@@ -203,7 +119,7 @@ MEDIUM
        the AI's "Shitet" misses it; condition wording is still unmerged in the DB and Excel
        (I ri 96, I përdorur - Si i ri 24, Ne gjendje te mire 18, I përdorur - Në gjendje të mirë 17,
        E re 15, E rikonstruktuar 5, ...); Njoftime's published_date is the last refresh (known).
-- No tests, no CI, no requirements.txt. Every new finding above was found by a script in minutes.
+- No tests, no CI. Every new finding above was found by a script in minutes.
 - State still lives in memory (play/pause, break, agency preference, RESUME_PAGE...) - Phase 4.
 
 LOW
@@ -219,7 +135,6 @@ LOW
        "res et_state()".
 - Search.searchable_text raises TypeError when phone isn't a string (fuzz; can't happen from the DB today).
 - Derive.floor_in_text doesn't read a basement "kati -1".
-- Njoftime's agency name check lets "Ina FutureHome" through as private (\bhomes?\b needs a word start).
 - No request body size limit (unchanged, not re-measured; only our own page can POST).
 - The "Nis me orar" time picker is drawn in the browser's locale (AM/PM on an English Windows).
 - Version "1.0.0/11/2026" is still rejected by packaging.version; switch to "1.0.0" before the updater.
@@ -245,7 +160,7 @@ WHAT IS GOOD (verified today)
 =====================================================================================
 - Host check, Origin check and no CORS still block every cross-site attempt, now including the new
   POST /api/favourite (no / foreign / null / other-port Origin -> 403; foreign or look-alike Host -> 400).
-- Path traversal blocked (../, %2e%2e, %2f, %252e, %5c, .git/config) and #1 fixed.
+- Path traversal blocked (../, %2e%2e, %2f, %252e, %5c, .git/config), and Windows UNC/drive/NUL paths answer 404 at once.
 - The favourites feature is solid: strict input (id 0, -1, 2^63, text, true; favourite 1 / "true" ->
   422), unknown id -> 404, idempotent, kept after a re-scrape, hidden with a blocked seller and back
   after unblocking, correct under 12 parallel writers, the migration works on an old DB.
@@ -268,7 +183,6 @@ As a customer (real estate agent):
 - Real value: four sites in one place, phone numbers, Albanian AI search, blocked sellers, Excel,
   and now favourites, which agents will use daily.
 - Friction:
-  - "Jo agjenci" silently hides every private seller on two of the four sites (N2).
   - On a phone the first listing starts at 703 px of a 740 px screen on the dashboard (the favourites
     page does better: 351 px).
   - Operator controls (break, schedule, agency preference) sit in the agent's face (REVIEW.md #15).
@@ -289,17 +203,15 @@ As a business (unchanged):
 
 As an engineer / QA:
 - Scraper code still copied four times (~560-790 lines each); app.js 2,145 lines; all scraper state in
-  module globals; everything derived at read time (which is why N1 and #4 hit every request).
+  module globals; everything derived at read time (which is why #4 hits every request).
 - Still no automated tests.
 
 =====================================================================================
 SUGGESTED ORDER
 =====================================================================================
-1. N1 (first_int + a per-listing guard in with_derived) and N2 (map "Person fizik", empty Njoftime
-   = private). Both are a few lines.
-2. N3 data sanity (sale price floor, title says rent, MerrJep sandbox listing) + "Shitet në ankand".
-3. Small ones together: N6 lookbehinds, B10, B11, B16, searchable_text phone type, B6.
-4. Turn the scratchpad scripts into a pytest suite (checks.py, fuzz.py, race.py, bigint.py first).
-5. #4 slim list endpoint + ?since=, then N4 (update the cache in place) and N5 (?favourite=1).
-6. Before agents use it: Headless = True and Window_Position (W4), B12 date, B8 visible failures.
-7. Add the open N items to the Bug list in NOTES.md.
+1. N3 data sanity (sale price floor, title says rent, MerrJep sandbox listing) + "Shitet në ankand".
+2. Small ones together: N6 lookbehinds, B10, B11, B16, searchable_text phone type, B6.
+3. Turn the scratchpad scripts into a pytest suite (checks.py, fuzz.py, race.py, bigint.py first).
+4. #4 slim list endpoint + ?since=.
+5. Before agents use it: Headless = True and Window_Position (W4), B12 date, B8 visible failures.
+6. Add the open N items to the Bug list in NOTES.md.

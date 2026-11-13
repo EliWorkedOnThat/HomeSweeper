@@ -99,11 +99,15 @@ def cached_listings(connection):
             LISTINGS_CACHE.update(version=version, listings=with_derived(get_listings(connection)))
         return LISTINGS_CACHE["listings"]
 
-#Helper function: throw the cached listings away, so the next request reads them again. For changes listings_version() can't
-#see, like a favourite (it only notices new listings and saves). Call it after the change is committed.
-def forget_cached_listings():
+#Helper function: copy a favourite (the heart) into the cached listing. listings_version() can't see this change (it only
+#notices new listings and saves), and rebuilding the whole cache for one true/false made the next load re-derive every listing.
+#Call it after the change is committed: a rebuild that runs first already reads the new value, setting it again is harmless.
+def set_cached_favourite(listing_id, favourite):
     with LISTINGS_LOCK:
-        LISTINGS_CACHE["version"] = None
+        for listing in LISTINGS_CACHE["listings"]:
+            if listing.get("id") == listing_id:
+                listing["favourite"] = favourite
+                break
 
 #Helper function: the given listings without the ones from blocked sellers. Used by everything that shows listings.
 def without_blocked(connection, listings):
@@ -378,6 +382,16 @@ def api_listings(site: str | None = None):
     finally:
         connection.close()
 
+#Endpoint: only the favourite listings (the favourites page), minus blocked sellers, read straight from the DB.
+#A handful of rows: no need for the listings cache, and the page doesn't download every listing to show a few.
+@app.get("/api/favourites")
+def api_favourites():
+    connection = open_db()
+    try:
+        return without_blocked(connection, with_derived(get_listings(connection, favourites_only=True)))
+    finally:
+        connection.close()
+
 #Helper function: run a search over every listing; returns the matching ids in result order,
 #and why each one matched the soft wishes ({id: [Albanian reasons]}), which the result cards show
 #Also returns the near misses (listings failing exactly one requirement) when the search found little:
@@ -593,7 +607,7 @@ def api_favourite(body: FavouriteRequest):
             raise HTTPException(status_code=404, detail="Ky njoftim nuk u gjet.")
     finally:
         connection.close()
-    forget_cached_listings() #The cache can't see this change by itself
+    set_cached_favourite(body.listing_id, body.favourite) #The cache can't see this change by itself
     return {"id": body.listing_id, "favourite": body.favourite}
 
 #Endpoint: download every stored listing as an Excel file, built fresh from the database

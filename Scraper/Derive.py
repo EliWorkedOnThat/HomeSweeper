@@ -6,6 +6,8 @@
 import re
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
+from rich import print
+from rich.markup import escape
 
 #Global Variables
 EUR_TO_ALL = 100 #Rough rate, only used to compare prices across EUR and ALL. UI/app.js has the same number for the price slider.
@@ -134,13 +136,19 @@ def center_km(tags):
     return round(value if match.group(2) == "km" else value / 1000, 2)
 
 #"3 kat" -> 3, "Përdhe" -> 0 (ground floor), nothing usable -> None
+#A floor or a bathroom count never has more than 3 digits, so a longer number counts as nothing usable. It's never converted:
+#int() refuses more than 4,300 digits, and one such tag used to make every listings load fail (N1 in the 2026-11-13 audit)
+MAX_COUNT_DIGITS = 3
+
 def first_int(value):
     if value is None or value == "":
         return None
     if "perdhe" in norm(value):
         return 0
     match = re.search(r"-?\d+", str(value))
-    return int(match.group()) if match else None
+    if not match or len(match.group().lstrip("-")) > MAX_COUNT_DIGITS:
+        return None
+    return int(match.group())
 
 #Floor written in the title/description, for listings whose site has no floor field (most of MerrJep, half of Gazeta):
 #"kati 4", "kati: 5", "kati i 4-t", "në katin e dytë", "kati i 9-te", "kati II", "kati i, e kompletuar" (= 1st)
@@ -202,11 +210,17 @@ def bedrooms_of(listing):
     rooms = listing.get("rooms")
     return rooms if isinstance(rooms, (int, float)) else None
 
-#Duashpi's scraper only marks agencies ("Kompani") and leaves private sellers empty, so empty means private there
+#Seller types in the shared wording, "Kompani" or "Person privat" (Search.POSTED_BY). MerrJep's own tag says "Person fizik" for a
+#private seller; its scraper maps it now, this also corrects the rows saved before that.
+POSTED_BY_NAMES = {"person fizik": "Person privat"}
+#Duashpi's and Njoftime's scrapers only mark agencies ("Kompani") and leave private sellers empty, so empty means private there
+PRIVATE_WHEN_EMPTY = ("duashpi", "njoftime")
+
 def posted_by_of(listing):
-    if listing.get("posted_by"):
-        return listing["posted_by"]
-    return "Person privat" if listing.get("site") == "duashpi" else None
+    posted_by = " ".join(str(listing.get("posted_by") or "").split())
+    if posted_by:
+        return POSTED_BY_NAMES.get(posted_by.casefold(), posted_by)
+    return "Person privat" if listing.get("site") in PRIVATE_WHEN_EMPTY else None
 
 #Prices that can't be real for the deal, usually a sale typed as a rent or a missing zero: a monthly rent under 30 € or over
 #20.000 €. They count as "no price" for filters, sorting and statistics, so "the cheapest rents" doesn't start with a 3 € one.
@@ -246,7 +260,14 @@ def derive(listing):
     }
 
 #Function that adds the derived values to every listing under "derived" (the raw columns stay as scraped)
+#One listing that breaks a rule must never blank the whole app (every listings load runs this), so a listing whose values
+#can't be worked out is logged and gets no derived values. Search.py and app.js read them with .get(), so {} is safe.
 def with_derived(listings):
     for listing in listings:
-        listing["derived"] = derive(listing)
+        try:
+            listing["derived"] = derive(listing)
+        except Exception as error:
+            print(f"[red]Could not derive the filter values of listing {escape(str(listing.get('id')))} "
+                  f"({escape(str(listing.get('site')))}): {escape(repr(error))}[/red]")
+            listing["derived"] = {}
     return listings

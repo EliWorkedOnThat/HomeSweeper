@@ -76,12 +76,12 @@ IMAGE_SELECTOR = ".js-thread-view-slider a.js-lbImage" #Photo slider, each link'
 #Agency check for "Jo Listime Agjensie" and posted_by: njoftime has no agency flag, so a seller counts as an agency when
 #they have a company logo on the card (a paid business profile) OR their account name sounds like a business.
 #Both are on the results card, so agency listings are skipped without opening them. A private seller with a logo is skipped
-#too, and an agency with a plain name and no logo gets through.
+#too, and an agency with a plain name and no logo gets through. "home" may end a longer word, so "Ina FutureHome" counts.
 AGENCY_NAME_PATTERN = re.compile(
-    r"imobil|immobil|real ?estate|realt|propert|agjen[cs]|agenc|agjent|\bprona\b|\bhomes?\b|\bestate\b"
+    r"imobil|immobil|real ?estate|realt|propert|agjen[cs]|agenc|agjent|\bprona\b|homes?\b|\bestate\b"
     r"|\bkompani|\bshpk\b|sh\.p\.k|\bgroup\b|\binvest|ndertim|construct"
 )
-AGENCY_POSTED_BY = "Kompani" #Agencies as decided above, everyone else is left empty (we can't be sure they are private)
+AGENCY_POSTED_BY = "Kompani" #Agencies as decided above, everyone else is left empty (Derive.posted_by_of() reads empty as private)
 
 #Human pacing, so the visit looks like a person reading the list (same idea as Gazeta and Duashpi)
 SCAN_TIME = (1.0, 2.5) #Random seconds spent "reading" each card before clicking it

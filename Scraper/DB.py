@@ -200,12 +200,17 @@ def record_ai_usage(connection, model, usage):
         raise DBError(str(e)) from e
 
 #Function to get the stored listings (newest first) for the UI and the Excel export, optionally only one site
-def get_listings(connection, site=None):
-    query = "SELECT * FROM listings"
-    params = ()
+#favourites_only=True returns only the hearted ones (the favourites page), so it never reads the whole table into memory
+def get_listings(connection, site=None, favourites_only=False):
+    conditions, params = [], []
     if site:
-        query += " WHERE site = ?"
-        params = (site,)
+        conditions.append("site = ?")
+        params.append(site)
+    if favourites_only:
+        conditions.append("favourite = 1")
+    query = "SELECT * FROM listings"
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY last_seen DESC, id DESC"
 
     try:

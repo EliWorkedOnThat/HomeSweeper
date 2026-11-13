@@ -1,0 +1,29 @@
+# HomeSweeper dependencies, pinned to exact versions so every PC and every build installs the same thing.
+# Python 3.10+ (developed on 3.14). Install from the project root:
+#   py -3.14 -m pip install -r requirements.txt        (Windows)
+#   python3 -m pip install -r requirements.txt         (Linux / macOS)
+#   py -3.14 -m playwright install chromium            (the fallback browser when Google Chrome isn't installed)
+# Upgrade Playwright on purpose only: a new version needs its own Chromium download (see CLAUDE.md -> Packaging).
+# Add a line here whenever a new third-party import is added.
+
+# Scraping
+playwright==1.64.1
+
+# Local web server and UI API
+fastapi==0.129.0
+starlette==0.52.1
+pydantic==2.12.5
+uvicorn==0.41.0
+
+# Pyet AI (the server imports it at startup, so it's needed even when the AI isn't used, bug B6)
+anthropic==2.6.0
+
+# Excel export, console output
+openpyxl==3.1.5
+rich==14.3.3
+
+# Tools/FetchHTML.py --fast (also used by FastAPI's TestClient)
+httpx==0.28.1
+
+# Time zone data for zoneinfo (Njoftime's dates); Windows Python ships without it
+tzdata==2026.2; sys_platform == "win32"

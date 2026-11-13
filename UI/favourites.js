@@ -6,11 +6,11 @@
 let favourites = []; // The favourite listings, enriched like on the dashboard
 let favSearch = ""; // The search box, lowercased and without accents (norm), like filters.search on the dashboard
 
-// Load every listing and keep the favourites. /api/listings already leaves out blocked sellers.
+// Load the favourites. /api/favourites sends only the hearted listings and already leaves out blocked sellers.
 async function loadFavourites() {
     let data;
     try {
-        const response = await fetch("/api/listings");
+        const response = await fetch("/api/favourites");
         if (!response.ok) throw new Error(await errorText(response));
         data = await response.json();
         $("load-error").hidden = true;
@@ -21,7 +21,7 @@ async function loadFavourites() {
         $("load-error").hidden = false;
         return;
     }
-    favourites = data.filter((l) => l.favourite).map(enrich);
+    favourites = data.map(enrich);
     drawFavourites();
 }
 

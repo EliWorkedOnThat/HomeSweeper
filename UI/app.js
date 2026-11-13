@@ -249,7 +249,7 @@ function enrich(l) {
     l._centerKm = d.center_km ?? null; // Only Duashpi gives it ("1.2km nga qendra")
     l._posted = d.posted ?? null; // ISO date the listing was posted (Derive.posted_date)
     l._bedrooms = d.bedrooms ?? l.rooms ?? null; // "2+1" -> 2, MerrJep's rooms column sometimes counts the living room too
-    l._postedBy = d.posted_by ?? l.posted_by ?? null; // Duashpi leaves private sellers empty
+    l._postedBy = d.posted_by ?? l.posted_by ?? null; // Derive.posted_by_of: "Kompani" or "Person privat" on every site
     l._priceEur = d.price_eur ?? null;
     l._perM2 = d.price_per_m2 ?? null;
     // Searched without accents (agents often type "tirane"), and the phone as digits with and without 355

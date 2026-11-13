@@ -37,6 +37,9 @@ ATTRIBUTE_COLUMNS = {
     "Adresa/Rruga": "address",
     "Njoftim nga": "posted_by",
 }
+#"Njoftim nga" says "Kompani" or "Person fizik". The shared value for a private seller is "Person privat" (Gazeta's word, and what
+#the AI search and the dashboard filter on), so "Person fizik" is saved as that. Derive.posted_by_of() fixes rows saved before.
+POSTED_BY_NAMES = {"Person fizik": "Person privat"}
 
 #Function to create a browser instance and run one turn: scrape up to turn_limit() NEW listings, then hand them back so the engine can save them
 #known_upids are the listings already in the database, they are skipped before clicking into them
@@ -564,6 +567,7 @@ def pull_data_from_listing(page, expected_upid):
         data[column] = attributes.get(label)
     data["size_m2"] = parse_number(data["size_m2"])
     data["rooms"] = parse_number(data["rooms"], whole=True)
+    data["posted_by"] = POSTED_BY_NAMES.get(data["posted_by"], data["posted_by"])
 
     return data
 
