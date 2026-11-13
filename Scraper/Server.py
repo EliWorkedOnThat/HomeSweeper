@@ -1,5 +1,6 @@
 #This file is the local web server for the UI. It's a thin layer: it only exposes Engine and DB functions as URLs, no scraping logic lives here.
-#Run from the project root with: python3 -m Scraper.Server   (Windows: py -3.14 -m Scraper.Server), then open http://127.0.0.1:8000
+#Run from the project root with: python3 -m Scraper.Server   (Windows: py -3.14 -m Scraper.Server), then open the address it prints
+#(http://127.0.0.1:8000, or the next free port if another program has 8000). Only one can run: a second start is refused.
 #Imports
 import json
 import os
@@ -20,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from rich import print
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from Scraper import AI
+from Scraper import AI, Instance
 from Scraper.Console import utf8_output
 from Scraper.DB import (DB_FILE, DBError, add_blocked_seller, ai_cost_today, connect_to_db, create_tables, delete_ai_search,
                         delete_blocked_seller, get_ai_search, get_ai_searches, get_blocked_sellers, get_known_places, get_listings,
@@ -32,8 +33,7 @@ from Scraper.Search import Filters, known_areas, match_reasons, near_misses, sea
 from Scraper.Version import get_version_and_updates
 
 #Global Variables
-HOST = "127.0.0.1" #Only this PC can reach the server, other devices on the network can't
-PORT = 8000
+HOST = "127.0.0.1" #Only this PC can reach the server, other devices on the network can't (the port is picked by Instance.py)
 UI_DIR = Path(__file__).resolve().parent.parent / "UI"
 AUTO_INTERVALS = (1, 5, 10, 15, 30, 60) #Minutes of break between turns the user can pick (the UI dropdown shows these)
 BUSY_RETRY_SECONDS = 5 #If an automatic run is due while a scrape is still going, check again after this long
@@ -634,7 +634,29 @@ def serve_favourite_page():
 #Serve the UI folder (index.html, style.css, app.js) at the root, must come after the /api routes
 app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
+#Start the server: only one per PC, on the first free port from 8000. A second start is refused (it doesn't touch the running one).
 if __name__ == "__main__":
     utf8_output()
-    print(f"[green]HomeSweeper running at http://{HOST}:{PORT} — press Ctrl+C to stop it.[/green]")
-    uvicorn.run(app, host=HOST, port=PORT)
+    lock = Instance.acquire_lock()
+    if lock is None:
+        Instance.refuse_second_run()
+    Instance.exit_cleanly_on_signals()
+    sock = None
+    try:
+        try:
+            sock = Instance.bind_free_port(HOST)
+        except OSError as error:
+            print(f"[red]Could not start HomeSweeper: {error}[/red]")
+            sys.exit(1)
+        port = sock.getsockname()[1]
+        url = f"http://{HOST}:{port}"
+        Instance.save_address(url)
+        if port != Instance.START_PORT:
+            print(f"[yellow]Port {Instance.START_PORT} is used by another program, using {port} instead.[/yellow]")
+        print(f"[green]HomeSweeper running at {url} — press Ctrl+C to stop it.[/green]")
+        uvicorn.Server(uvicorn.Config(app, host=HOST, port=port)).run(sockets=[sock])
+    finally:
+        #Free the port first, then the lock: a new start must never get the lock while our port is still held
+        if sock is not None:
+            sock.close()
+        Instance.release_lock(lock)

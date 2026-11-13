@@ -4,6 +4,7 @@ from MerrJep_al.PlaywrightScraper1 import create_browser_instance as scrape_merr
 from GazetaCelesi.PlaywrightScraper import scrape_gazetacelesi
 from Duashpi_al.PlaywrightScraper2 import scrape_duashpi_al
 from njoftime_al.PlaywrightScraper3 import scrape_njoftime
+from Scraper import Instance
 from Scraper.Console import utf8_output
 from Scraper.Output import save_listings as export_to_excel
 from Scraper.DB import connect_to_db, create_tables, save_listing, get_known_upids
@@ -79,6 +80,14 @@ def run_site(connection, site, scrape, skip_agencies, should_stop):
         print(f"[red]Excel export for {site} failed, the listings are still saved in the database: {error}[/red]")
     return {"found": len(listings), "saved": saved, "failed": len(listings) - saved}
 
+#A terminal turn takes the same one-run lock as the server, so it can't scrape into the database while the server (or another
+#terminal turn) is running
 if __name__ == "__main__":
     utf8_output()
-    main()
+    lock = Instance.acquire_lock()
+    if lock is None:
+        Instance.refuse_second_run()
+    try:
+        main()
+    finally:
+        Instance.release_lock(lock)

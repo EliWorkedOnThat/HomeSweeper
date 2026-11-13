@@ -199,6 +199,15 @@ All filtering runs in the browser on the listings the server hands over. `enrich
 - **Daily start ("Nis me orar"):** at the chosen time on the PC's clock the server turns continuous mode on, as if play was pressed, and it runs until paused. Saved in `Data/settings.json` (survives a restart). If the app is closed at that time nothing runs; if the PC was asleep it starts on waking.
 - **Cards and pages:** the matching listings are split into pages (12 / 24 / 48 per page, with page buttons under the strip). One page sits in a **horizontal strip** of cards that are all the same size (`--card-w` × `--card-h` on `.cards-wrap`: 340 × 720 px on desktop, screen width minus 72 px × 740 px on phones). Inside a card, `.facts` takes whatever height is left and fades out at the bottom, so the boxes are ordered by importance; everything is still in **Detajet**. Changing a filter or the sort goes back to page 1, but new listings arriving after a scrape keep you on the page you're on (`render()` vs `draw()` in `app.js`).
 
+### One run per PC, free port (`Scraper/Instance.py`, 2026-11-13)
+- **One run:** the server and a terminal `python -m Scraper.Engine` turn both hold an OS lock on `Data/server.lock` (`msvcrt.locking` on Windows, `fcntl.flock` on macOS/Linux) while they run; the server also writes its address to `Data/server.json`. A second start of either can't get the lock and is **refused** (red message naming what's running, exit code 1). It never opens, closes or restarts the running one. Two runs would scrape into the same DB at once. The OS releases the lock when the process dies, so a crash never blocks the next start, and whoever takes the lock deletes a `server.json` left by a killed run.
+- **Why an OS lock and not a flag file/folder:** the lock is on the open file, not on whether the file exists. `server.lock` stays on disk for good and is never read; what blocks a second run is that a live process holds the lock on it. A "create a flag, delete it at the end" design breaks on a crash, power cut or Task Manager kill: the delete never runs, the flag stays, and the app refuses to start until someone deletes it by hand. An OS lock can't go stale, because the OS drops it the moment the process dies. Don't replace it with an existence check.
+- **Release on stop:** the server's `finally` closes its socket, then releases the lock and deletes `server.json` (port first, so a new start can't get the lock while the port is still held). uvicorn shuts down gracefully on Ctrl+C / Ctrl+Break / `kill`, then re-sends the signal; Python's default for SIGTERM/SIGBREAK kills the process without running the `finally` (exit code 3 on Windows), so `exit_cleanly_on_signals()` turns them into a normal exit. Windows frees an exclusively bound port at once after a stop (no TIME_WAIT wait), so a restart gets 8000 again.
+- **Free port:** 8000 first, then 8001… up to 8049, so the address only changes when another program has 8000. Other agents on the network can't take your port: each PC has its own `127.0.0.1`. The bound socket is handed to `uvicorn.Server.run(sockets=…)`, so nothing can grab the port between the check and the start.
+- **Why the check test-binds `0.0.0.0` and `::`:** Windows lets a bind on `127.0.0.1:8000` succeed while another program listens on `0.0.0.0:8000` (even with `SO_EXCLUSIVEADDRUSE`), and would quietly take that program's local traffic. A connect check is too slow on Windows (2 s per closed port). The test binds don't listen, so no firewall prompt. On macOS/Linux the test bind sets `SO_REUSEADDR`, otherwise the TIME_WAIT left by a just-stopped server made a quick restart move to 8001 (seen on Linux).
+- **Tested** on Windows (a program holding 8000 → server on 8001; a second server and an Engine turn refused while the first kept serving; Ctrl+Break → exit 0, port/lock/`server.json` all freed, the next start back on 8000; a force-kill frees port and lock) and on Linux through WSL (port checks, lock between processes, SIGINT and SIGTERM both run the cleanup). **Not tested on macOS yet.** Scripts and tests that call the API must use the printed port in their `Origin` header.
+- The LAN/tunnel demo command (`uvicorn Scraper.Server:app --host 0.0.0.0`) bypasses all of this; it's for demos only.
+
 ### Server safety and speed (2026-11-06)
 - **Only our own page can use the API.** `TrustedHostMiddleware` accepts only the Host `127.0.0.1`/`localhost` (stops DNS rebinding: a website pointing its domain at 127.0.0.1). `same_origin_only` rejects any POST/DELETE whose `Origin` isn't our own address with a 403. Browsers send `Origin` on every `fetch` POST, so the UI needs nothing special; scripts and tests must send `Origin: http://127.0.0.1:8000`.
 - Every response has a Content-Security-Policy (`script-src 'self'`, no inline or eval scripts) plus `nosniff` and `no-referrer`. Never add inline `<script>`/`onclick`/`style=""` to the UI. Playwright tests that use string predicates (`wait_for_function("…")`) need `bypass_csp=True`.
@@ -461,7 +470,7 @@ The architecture and the reasons for it are in **"Product architecture" in `CLAU
 4. `settings.json` for agent settings (the auto interval, "Jo Listime Agjensie"), loaded at startup.
 5. DB migrations with `PRAGMA user_version` instead of "delete the DB".
 6. Logging to files (windowed builds have no console, and `sys.stdout` is `None`).
-7. The `HomeSweeper.py` launcher: single instance, free port, open the browser, tray icon.
+7. The `HomeSweeper.py` launcher: single instance, free port, open the browser, tray icon. (Single instance and free port are done, in `Scraper/Instance.py`, 2026-11-13.)
 8. First-run Chromium download into user data, with a progress page.
 9. A PyInstaller spec, built and tested by hand on Windows first, then macOS.
 10. The Windows installer (Inno Setup) and the macOS `.dmg`.
@@ -494,7 +503,7 @@ Run everything from the **project root**, because the imports are package-style 
 `requirements.txt` pins every direct dependency to an exact version (added 2026-11-13). If someone adds a new third-party import, add a pinned line there too. `requests` and `beautifulsoup4` are no longer needed (nothing imports them).
 
 ### Start it
-    py -3.14 -m Scraper.Server                    # the app: open http://127.0.0.1:8000, Ctrl+C to stop
+    py -3.14 -m Scraper.Server                    # the app: open the address it prints (http://127.0.0.1:8000 unless 8000 is taken), Ctrl+C to stop
     py -3.14 -m Scraper.Engine                    # one turn of every site in the terminal, no UI
     py -3.14 -m GazetaCelesi.PlaywrightScraper    # one Gazeta turn only, prints the listings, doesn't touch the DB
     py -3.14 -m MerrJep_al.PlaywrightScraper1     # one MerrJep turn only, doesn't touch the DB
