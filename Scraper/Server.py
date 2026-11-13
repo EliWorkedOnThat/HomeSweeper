@@ -651,8 +651,10 @@ if __name__ == "__main__":
         port = sock.getsockname()[1]
         url = f"http://{HOST}:{port}"
         Instance.save_address(url)
-        if port != Instance.START_PORT:
+        if port == Instance.START_PORT + 1:
             print(f"[yellow]Port {Instance.START_PORT} is used by another program, using {port} instead.[/yellow]")
+        elif port != Instance.START_PORT:
+            print(f"[yellow]Ports {Instance.START_PORT}-{port - 1} are used by other programs, using {port} instead.[/yellow]")
         print(f"[green]HomeSweeper running at {url} — press Ctrl+C to stop it.[/green]")
         uvicorn.Server(uvicorn.Config(app, host=HOST, port=port)).run(sockets=[sock])
     finally:
